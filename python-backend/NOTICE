@@ -1,0 +1,9 @@
+This directory contains a Flask + ytmusicapi backend adapted from:
+
+  https://github.com/KiyoshiTheDevil/Kodama
+  Copyright (C) Kodama contributors
+  Licensed under the GNU Affero General Public License v3.0
+  See LICENSE.Kodama
+
+Modifications for YTMD Lite (packaging paths, radio/supermix routing, etc.)
+are copyright their respective authors and distributed under the same AGPL-3.0 terms.

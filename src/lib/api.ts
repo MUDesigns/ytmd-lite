@@ -1,0 +1,456 @@
+import type { BrowseResult, MusicItem } from "./types";
+
+export const API_BASE = "http://127.0.0.1:9847";
+
+const RECENT_KEY = "ytmd.recentSearches";
+const RECENT_MAX = 8;
+
+const MOOD_COLORS = [
+  "#e57373",
+  "#f06292",
+  "#ba68c8",
+  "#9575cd",
+  "#7986cb",
+  "#64b5f6",
+  "#4fc3f7",
+  "#4dd0e1",
+  "#4db6ac",
+  "#81c784",
+  "#aed581",
+  "#ffb74d",
+  "#ff8a65",
+  "#a1887f",
+];
+
+async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, init);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      throw new Error(
+        "Catalog API unreachable on :9847 — restart the app or run: python Kodama/python-backend/server.py",
+      );
+    }
+    throw e instanceof Error ? e : new Error(msg);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err =
+      (data as { error?: string }).error ||
+      (data as { message?: string }).message ||
+      `HTTP ${res.status}`;
+    throw new Error(err);
+  }
+  if (data && typeof data === "object" && "error" in data && (data as { error: unknown }).error) {
+    throw new Error(String((data as { error: unknown }).error));
+  }
+  return data as T;
+}
+
+function artistsLine(artists: unknown): string {
+  if (typeof artists === "string") return artists;
+  if (Array.isArray(artists)) {
+    return artists
+      .map((a) => (typeof a === "string" ? a : (a as { name?: string })?.name || ""))
+      .filter(Boolean)
+      .join(", ");
+  }
+  return "";
+}
+
+function colorFor(title: string): string {
+  let h = 0;
+  for (let i = 0; i < title.length; i++) h = (h * 31 + title.charCodeAt(i)) >>> 0;
+  return MOOD_COLORS[h % MOOD_COLORS.length];
+}
+
+function pickThumbUrl(raw: Record<string, unknown>): string {
+  if (typeof raw.thumbnail === "string" && raw.thumbnail) return raw.thumbnail;
+  if (raw.thumbnail && typeof raw.thumbnail === "object") {
+    const u = (raw.thumbnail as { url?: string }).url;
+    if (u) return u;
+  }
+  const list = raw.thumbnails;
+  if (!Array.isArray(list) || !list.length) return "";
+  // Prefer last (usually largest) when entries are strings or {url,width}
+  for (let i = list.length - 1; i >= 0; i--) {
+    const t = list[i];
+    if (typeof t === "string" && t) return t;
+    if (t && typeof t === "object" && typeof (t as { url?: string }).url === "string") {
+      return (t as { url: string }).url;
+    }
+  }
+  return "";
+}
+
+/** Route Google/YT thumbs through the local proxy (Referer from localhost is blocked). */
+export function proxiedUrl(url: string | null | undefined): string {
+  if (!url) return "";
+  if (
+    url.startsWith("data:") ||
+    url.startsWith("blob:") ||
+    url.startsWith(API_BASE) ||
+    url.includes("/imgproxy?")
+  ) {
+    return url;
+  }
+  return `${API_BASE}/imgproxy?hq=1&url=${encodeURIComponent(url)}`;
+}
+
+/** Map Kodama API item → MusicItem */
+export function mapItem(raw: Record<string, unknown>): MusicItem {
+  const typeRaw = String(raw.type || "").toLowerCase();
+  const browseId = raw.browseId ? String(raw.browseId) : undefined;
+  let playlistId = raw.playlistId ? String(raw.playlistId) : undefined;
+  if (!playlistId && browseId?.startsWith("VL")) playlistId = browseId.slice(2);
+  const videoId = raw.videoId ? String(raw.videoId) : undefined;
+
+  let type: MusicItem["type"] = "song";
+  if (typeRaw === "album" || typeRaw === "single" || typeRaw === "ep") type = "album";
+  else if (typeRaw === "artist") type = "artist";
+  else if (typeRaw === "playlist" || typeRaw === "podcast") type = "playlist";
+  else if (typeRaw === "mood") type = "mood";
+  else if (browseId?.startsWith("UC")) type = "artist";
+  else if (browseId?.startsWith("VL") || playlistId) type = "playlist";
+  else if (
+    browseId?.startsWith("MPRE") ||
+    browseId?.startsWith("OLAK5") ||
+    browseId?.startsWith("MPSP")
+  ) {
+    type = "album";
+  } else if (typeRaw === "song" || typeRaw === "video" || videoId) type = "song";
+  else if (browseId) type = "album";
+
+  // Collections must open a detail page — don't treat a stray videoId as "just a song".
+  const isCollection =
+    type === "album" || type === "playlist" || type === "artist" || type === "mood" || !!playlistId;
+  const playableVideoId = isCollection ? undefined : videoId;
+
+  const thumb = pickThumbUrl(raw);
+  const title = String(raw.title || raw.artist || "Untitled");
+
+  const subtitle =
+    (typeof raw.subtitle === "string" && raw.subtitle) ||
+    artistsLine(raw.artists) ||
+    (raw.year ? String(raw.year) : "") ||
+    (raw.count ? `${raw.count} tracks` : "") ||
+    undefined;
+
+  return {
+    type,
+    id: playableVideoId || browseId || playlistId || title,
+    title,
+    subtitle,
+    thumbnails: thumb ? [thumb] : [],
+    browseId,
+    playlistId,
+    videoId: playableVideoId,
+    params: raw.params ? String(raw.params) : undefined,
+    color: typeof raw.color === "string" ? raw.color : undefined,
+  };
+}
+
+function mapTrack(t: Record<string, unknown>): MusicItem {
+  return mapItem({
+    type: "song",
+    videoId: t.videoId,
+    title: t.title,
+    artists: t.artists,
+    album: t.album,
+    thumbnail: t.thumbnail,
+  });
+}
+
+export async function validateAuth(): Promise<{
+  valid: boolean;
+  profile?: string;
+  type?: string;
+  reason?: string;
+}> {
+  try {
+    return await api("/auth/validate");
+  } catch {
+    return { valid: false, reason: "api_unreachable" };
+  }
+}
+
+export async function loadHome(): Promise<BrowseResult> {
+  const data = await api<{ sections?: Array<{ title?: string; items?: Record<string, unknown>[] }> }>(
+    "/home",
+  );
+  const shelves: MusicItem[] = (data.sections || []).map((sec, i) => ({
+    type: "shelf",
+    id: `home-${i}-${sec.title || ""}`,
+    title: sec.title || "Shelf",
+    thumbnails: [],
+    items: (sec.items || []).map(mapItem),
+  }));
+  return { title: "Home", shelves, items: [] };
+}
+
+export async function loadExplore(): Promise<BrowseResult> {
+  const groups = await api<Record<string, Array<{ title?: string; params?: string }>>>(
+    "/mood/categories",
+  );
+  const shelves: MusicItem[] = Object.entries(groups).map(([section, chips], i) => ({
+    type: "shelf",
+    id: `mood-${i}-${section}`,
+    title: section,
+    thumbnails: [],
+    items: (chips || []).map((c) => {
+      const title = c.title || "Mood";
+      return {
+        type: "mood" as const,
+        id: c.params || title,
+        title,
+        thumbnails: [],
+        params: c.params,
+        color: colorFor(title),
+      };
+    }),
+  }));
+  return { title: "Explore", shelves, items: [] };
+}
+
+export async function loadLibrary(): Promise<BrowseResult> {
+  const [playlists, albums, artists] = await Promise.all([
+    api<{ playlists?: Record<string, unknown>[] }>("/library/playlists").catch(() => ({
+      playlists: [],
+    })),
+    api<{ albums?: Record<string, unknown>[] }>("/library/albums").catch(() => ({ albums: [] })),
+    api<{ artists?: Record<string, unknown>[] }>("/library/artists").catch(() => ({ artists: [] })),
+  ]);
+
+  const shelves: MusicItem[] = [];
+  const plItems = (playlists.playlists || []).map((p) =>
+    mapItem({ ...p, type: "playlist", title: p.title }),
+  );
+  if (plItems.length) {
+    shelves.push({
+      type: "shelf",
+      id: "lib-playlists",
+      title: "Playlists",
+      thumbnails: [],
+      items: plItems,
+    });
+  }
+  const alItems = (albums.albums || []).map((a) => mapItem({ ...a, type: "album" }));
+  if (alItems.length) {
+    shelves.push({
+      type: "shelf",
+      id: "lib-albums",
+      title: "Albums",
+      thumbnails: [],
+      items: alItems,
+    });
+  }
+  const arItems = (artists.artists || []).map((a) =>
+    mapItem({
+      ...a,
+      type: "artist",
+      title: a.artist || a.title,
+    }),
+  );
+  if (arItems.length) {
+    shelves.push({
+      type: "shelf",
+      id: "lib-artists",
+      title: "Artists",
+      thumbnails: [],
+      items: arItems,
+    });
+  }
+  return { title: "Library", shelves, items: [] };
+}
+
+export async function search(query: string): Promise<BrowseResult> {
+  const data = await api<{ results?: Record<string, unknown>[] }>(
+    `/search?q=${encodeURIComponent(query)}`,
+  );
+  const items = (data.results || []).map(mapItem);
+  return {
+    title: "Search",
+    shelves: items.length
+      ? [{ type: "shelf", id: "search", title: "Results", thumbnails: [], items }]
+      : [],
+    items,
+  };
+}
+
+export async function searchSuggestions(query: string) {
+  return api<{ suggestions: string[] }>(
+    `/search/suggestions?q=${encodeURIComponent(query)}`,
+  );
+}
+
+export async function likeSong(
+  videoId: string,
+  rating: "LIKE" | "INDIFFERENT" | "DISLIKE" = "LIKE",
+  meta?: { title?: string; artists?: string; album?: string; thumbnail?: string },
+) {
+  return api<{ ok: boolean; rating: string }>(`/like/${encodeURIComponent(videoId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rating, ...meta }),
+  });
+}
+
+export async function getLikedIds(): Promise<string[]> {
+  try {
+    const data = await api<{ ids?: string[] }>("/liked/ids");
+    return data.ids || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function browseDetail(opts: {
+  browseId?: string;
+  playlistId?: string;
+  params?: string;
+  title?: string;
+}): Promise<BrowseResult> {
+  if (opts.params) {
+    const data = await api<Record<string, unknown>[] | { error?: string }>(
+      `/mood/playlists?params=${encodeURIComponent(opts.params)}`,
+    );
+    const list = Array.isArray(data) ? data : [];
+    return { title: opts.title || "Mood", shelves: [], items: list.map(mapItem) };
+  }
+
+  if (opts.playlistId || opts.browseId?.startsWith("VL")) {
+    const pid =
+      opts.playlistId ||
+      (opts.browseId!.startsWith("VL") ? opts.browseId!.slice(2) : opts.browseId!);
+    // Radio / auto-mix ids (Supermix, Archive Mix, artist radio, …) are infinite
+    // watch playlists — get_playlist hangs; use /radio (get_watch_playlist) instead.
+    const isRadioMix = pid.startsWith("RD");
+    const data = await api<{
+      title?: string;
+      tracks?: Record<string, unknown>[];
+      thumbnails?: unknown;
+      thumbnail?: unknown;
+      author?: string;
+      artists?: unknown;
+      error?: string;
+    }>(`${isRadioMix ? "/radio" : "/playlist"}/${encodeURIComponent(pid)}`);
+    if (data.error) throw new Error(data.error);
+    const items = (data.tracks || []).map(mapTrack);
+    const cover =
+      pickThumbUrl(data as Record<string, unknown>) ||
+      items.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
+      "";
+    return {
+      title: data.title || opts.title || (isRadioMix ? "Mix" : "Playlist"),
+      subtitle: artistsLine(data.artists) || (typeof data.author === "string" ? data.author : undefined),
+      shelves: [],
+      items,
+      thumbnails: cover ? [cover] : [],
+    };
+  }
+
+  const bid = opts.browseId || "";
+  if (bid.startsWith("UC")) {
+    const data = await api<{
+      name?: string;
+      tracks?: Record<string, unknown>[];
+      albums?: Record<string, unknown>[];
+      singles?: Record<string, unknown>[];
+      thumbnails?: unknown;
+      thumbnail?: unknown;
+    }>(`/artist/${encodeURIComponent(bid)}`);
+    const tracks = (data.tracks || []).map(mapTrack);
+    const albums = [...(data.albums || []), ...(data.singles || [])].map((a) =>
+      mapItem({ ...a, type: "album" }),
+    );
+    const shelves: MusicItem[] = [];
+    if (albums.length) {
+      shelves.push({
+        type: "shelf",
+        id: "artist-albums",
+        title: "Albums & singles",
+        thumbnails: [],
+        items: albums,
+      });
+    }
+    const cover =
+      pickThumbUrl(data as Record<string, unknown>) ||
+      tracks.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
+      albums.find((a) => a.thumbnails?.[0])?.thumbnails?.[0] ||
+      "";
+    return {
+      title: data.name || opts.title || "Artist",
+      shelves,
+      items: tracks,
+      thumbnails: cover ? [cover] : [],
+    };
+  }
+
+  if (bid) {
+    const data = await api<{
+      title?: string;
+      tracks?: Record<string, unknown>[];
+      thumbnails?: unknown;
+      thumbnail?: unknown;
+      artists?: unknown;
+    }>(`/album/${encodeURIComponent(bid)}`);
+    const items = (data.tracks || []).map(mapTrack);
+    const cover =
+      pickThumbUrl(data as Record<string, unknown>) ||
+      items.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
+      "";
+    return {
+      title: data.title || opts.title || "Album",
+      subtitle: artistsLine(data.artists),
+      shelves: [],
+      items,
+      thumbnails: cover ? [cover] : [],
+    };
+  }
+
+  throw new Error("Nothing to browse");
+}
+
+/** @deprecated use browseDetail */
+export async function browse(browseId: string, params?: string) {
+  return browseDetail({ browseId, params });
+}
+
+export function streamUrl(videoId: string) {
+  return `${API_BASE}/audio-stream/${encodeURIComponent(videoId)}`;
+}
+
+export function thumb(item: { thumbnails?: string[] } | null | undefined, fallback = "") {
+  const list = item?.thumbnails;
+  if (!list?.length) return fallback;
+  const raw = list[list.length - 1] || list[0] || fallback;
+  return proxiedUrl(typeof raw === "string" ? raw : "");
+}
+
+export function loadRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function pushRecentSearch(query: string) {
+  const q = query.trim();
+  if (!q) return;
+  const next = [q, ...loadRecentSearches().filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(
+    0,
+    RECENT_MAX,
+  );
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+  return next;
+}

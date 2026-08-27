@@ -1,0 +1,38 @@
+[package]
+name = "ytmd-lite"
+version = "0.1.0"
+description = "Lightweight YouTube Music Desktop client with Last.fm"
+authors = ["ytmd-lite"]
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "ytmd_lite_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+md5 = "0.7"
+sha1 = "0.10"
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+parking_lot = "0.12"
+dirs = "6"
+url = "2"
+tokio = { version = "1", features = ["time", "rt", "macros", "sync"] }
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+cpal = "0.18.2"
+discord-rich-presence = "1.1"
+tauri-plugin-process = "2.3.1"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2.10.1"

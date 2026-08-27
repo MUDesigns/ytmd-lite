@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            backend_name: ytmd-backend-x86_64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Write Last.fm secrets
+        shell: bash
+        env:
+          LASTFM_SECRETS_JSON: ${{ secrets.LASTFM_SECRETS_JSON }}
+        run: |
+          if [ -n "$LASTFM_SECRETS_JSON" ]; then
+            printf '%s' "$LASTFM_SECRETS_JSON" > src-tauri/lastfm.secrets.json
+          else
+            cp lastfm.secrets.json.example src-tauri/lastfm.secrets.json
+          fi
+
+      - name: Build Python sidecar
+        shell: bash
+        run: |
+          python -m venv python-backend/.venv
+          source python-backend/.venv/Scripts/activate
+          pip install -r python-backend/requirements.txt pyinstaller
+          mkdir -p src-tauri/binaries
+          pyinstaller --noconfirm --onefile \
+            --name ytmd-backend-x86_64-pc-windows-msvc \
+            --distpath src-tauri/binaries \
+            --workpath python-backend/build_tmp \
+            --specpath python-backend/build_tmp \
+            --hidden-import=ytmusicapi \
+            --hidden-import=flask \
+            --hidden-import=flask_cors \
+            --hidden-import=yt_dlp \
+            --hidden-import=pykakasi \
+            --collect-all ytmusicapi \
+            --collect-all yt_dlp \
+            --collect-all pykakasi \
+            python-backend/server.py
+          # Ship sidecar next to resources so the installed app can find it
+          cp "src-tauri/binaries/${{ matrix.backend_name }}" \
+            "src-tauri/binaries/ytmd-backend.exe"
+          mkdir -p src-tauri/resources
+          cp "src-tauri/binaries/ytmd-backend.exe" src-tauri/resources/ytmd-backend.exe
+
+      - name: Patch bundle resources for sidecar
+        shell: bash
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = 'src-tauri/tauri.conf.json';
+          const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+          j.bundle.resources = j.bundle.resources || [];
+          if (!j.bundle.resources.includes('resources/ytmd-backend.exe')) {
+            j.bundle.resources.push('resources/ytmd-backend.exe');
+          }
+          fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+
+      - name: Build + release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', '0.1.0') }}
+          releaseName: YTMD Lite ${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.0' }}
+          releaseBody: |
+            ## YTMD Lite
+
+            Custom YouTube Music desktop client (Tauri 2).
+
+            Auto-update is enabled for signed installs via `latest.json` on this release.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+          updaterJsonPreferNsis: true

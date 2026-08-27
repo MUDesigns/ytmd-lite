@@ -1,0 +1,174 @@
+:root {
+  /* Dense IDE shell — monospace throughout */
+  --md-sys-color-surface: #0f131a;
+  --md-sys-color-surface-container-lowest: #0a0d12;
+  --md-sys-color-surface-container-low: #10141c;
+  --md-sys-color-surface-container: #161b24;
+  --md-sys-color-surface-container-high: #1c2330;
+  --md-sys-color-surface-container-highest: #252d3c;
+  --md-sys-color-on-surface: #d7dde8;
+  --md-sys-color-on-surface-variant: #7f8aa3;
+  --md-sys-color-outline: #2a3344;
+  --md-sys-color-outline-variant: #1e2633;
+  --md-sys-color-primary: #a8c7fa;
+  --md-sys-color-on-primary: #062e6f;
+  --md-sys-color-primary-container: #1a3a6e;
+  --md-sys-color-error: #f2b8b5;
+  --md-sys-color-tertiary: #c4a8e8;
+
+  --app-bar-h: 36px;
+  --rail-w: 64px;
+  --player-h: 96px;
+  --status-h: 22px;
+  --hairline: 1px solid var(--md-sys-color-outline-variant);
+  --font: "JetBrains Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
+  --font-mono: var(--font);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --press: 0.97;
+  --radius: 2px;
+
+  /* IDE terminal panel (playbar) */
+  --term-bg: #0c0f14;
+  --term-chrome: #151a22;
+  --term-border: #2a3344;
+  --term-fg: #d7dde8;
+  --term-muted: #7f8aa3;
+  --term-accent: #a8c7fa;
+  --scrollbar-size: 10px;
+  --scrollbar-track: #0a0d12;
+  --scrollbar-thumb: #2a3344;
+  --scrollbar-thumb-hover: #3a455c;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.45;
+  font-feature-settings: "ss01" 0, "calt" 1;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+body > div,
+#svelte {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: inherit;
+  transition:
+    background 0.12s var(--ease-out),
+    color 0.12s var(--ease-out),
+    border-color 0.12s var(--ease-out),
+    opacity 0.12s var(--ease-out);
+}
+
+button:active:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 1px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+
+.material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 20;
+  font-size: 18px;
+  line-height: 1;
+  letter-spacing: normal;
+}
+
+input[type="range"] {
+  accent-color: var(--md-sys-color-primary);
+  cursor: pointer;
+}
+
+input[type="text"],
+input:not([type]),
+select,
+textarea {
+  background: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--radius);
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
