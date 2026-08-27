@@ -7,6 +7,11 @@ export type Panel =
   | "lastfm"
   | "settings";
 
+export type ArtistLink = {
+  name: string;
+  browseId?: string;
+};
+
 export type MusicItem = {
   type: "song" | "album" | "artist" | "playlist" | "shelf" | "mood";
   id: string;
@@ -19,6 +24,9 @@ export type MusicItem = {
   params?: string;
   color?: string;
   items?: MusicItem[];
+  /** Primary artist channel (UC…) when known */
+  artistBrowseId?: string;
+  artistLinks?: ArtistLink[];
 };
 
 export type BrowseResult = {
@@ -27,6 +35,13 @@ export type BrowseResult = {
   items: MusicItem[];
   thumbnails?: string[];
   subtitle?: string;
+  artistBrowseId?: string;
+  artistLinks?: ArtistLink[];
+  /** e.g. "1.2M monthly listeners" for artist pages */
+  meta?: string;
+  kind?: "album" | "playlist" | "artist" | "mood" | "collection";
+  subscribed?: boolean;
+  channelId?: string;
 };
 
 export type EngineStatus = {
@@ -41,6 +56,7 @@ export type QueueItem = {
   author: string;
   thumbnails: string[];
   selected: boolean;
+  channelId?: string;
 };
 
 export type PlayerState = {

@@ -397,12 +397,20 @@ def _artist_names(artist_list):
     return ", ".join(a.get("name") for a in (artist_list or []) if isinstance(a, dict) and a.get("name"))
 
 def _artist_links(artist_list):
-    """Return [{name, browseId}, ...] for all artists that have a name."""
-    return [
-        {"name": a.get("name", ""), "browseId": a.get("id") or a.get("browseId") or ""}
-        for a in (artist_list or [])
-        if a.get("name")
-    ]
+    """Return [{name, browseId}, ...] for all artists that have a name.
+    browseId may be empty when YouTube omits the channel id — the UI can resolve by name."""
+    out = []
+    for a in (artist_list or []):
+        if not isinstance(a, dict):
+            continue
+        name = (a.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "browseId": a.get("id") or a.get("browseId") or "",
+        })
+    return out
 
 def _pick_thumb(thumbs, min_size=226):
     """Pick the smallest thumbnail that is at least min_size px wide.
@@ -3367,6 +3375,8 @@ def get_radio(playlist_id):
                 "videoId":    t.get("videoId", ""),
                 "title":      t.get("title", ""),
                 "artists":    artists,
+                "artistBrowseId": (artist_list[0].get("id") or "") if artist_list else "",
+                "artistLinks": _artist_links(artist_list),
                 "album":      album.get("name", "") if isinstance(album, dict) else "",
                 "thumbnail":  thumb,
                 "duration":   t.get("duration") or t.get("length", ""),
@@ -3844,11 +3854,14 @@ def _map_search_artist(t):
     }
 
 def _map_search_album(t):
+    artist_list = t.get("artists", []) or []
     return {
         "type": "album",
         "browseId": t.get("browseId", ""),
         "title": t.get("title", ""),
-        "artists": _artist_names(t.get("artists", []) or []),
+        "artists": _artist_names(artist_list),
+        "artistBrowseId": (artist_list[0].get("id") or "") if artist_list else "",
+        "artistLinks": _artist_links(artist_list),
         "year": t.get("year", ""),
         "thumbnail": _pick_thumb(t.get("thumbnails", [])),
     }
@@ -4032,12 +4045,16 @@ def get_home():
                         playlist_id = ""
                     thumbs = item.get("thumbnails", [])
                     thumb = _pick_thumb(thumbs)
-                    artists = _artist_names(item.get("artists"))
+                    artist_list = item.get("artists") or []
+                    artists = _artist_names(artist_list)
                     entry = {
                         "type": item_type,
                         "browseId": browse_id,
                         "title": item.get("title", ""),
                         "subtitle": artists or item.get("year", ""),
+                        "artists": artists,
+                        "artistBrowseId": (artist_list[0].get("id") or "") if artist_list and isinstance(artist_list[0], dict) else "",
+                        "artistLinks": _artist_links(artist_list),
                         "thumbnail": thumb,
                     }
                     if playlist_id:

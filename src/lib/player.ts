@@ -100,6 +100,7 @@ function buildState(trackState = "Unknown"): PlayerState {
           title: item.title,
           author: item.author || "",
           album: "",
+          channelId: item.channelId,
           durationSeconds: duration || 0,
           thumbnails: item.thumbnails || [],
         }
@@ -151,9 +152,10 @@ function toQueueItem(item: MusicItem): QueueItem | null {
   return {
     videoId: item.videoId,
     title: item.title,
-    author: item.subtitle || "",
+    author: item.subtitle || item.artistLinks?.map((a) => a.name).join(", ") || "",
     thumbnails: item.thumbnails || [],
     selected: false,
+    channelId: item.artistBrowseId || item.artistLinks?.find((a) => a.browseId)?.browseId,
   };
 }
 

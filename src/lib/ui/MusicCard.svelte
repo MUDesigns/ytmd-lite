@@ -1,23 +1,29 @@
 <script lang="ts">
-  import type { MusicItem } from "$lib/types";
+  import type { ArtistLink, MusicItem } from "$lib/types";
   import { thumb } from "$lib/api";
+  import ArtistLinks from "./ArtistLinks.svelte";
 
   let {
     item,
     onopen,
     onplay,
     oncontext,
+    onartist,
   }: {
     item: MusicItem;
     onopen?: (item: MusicItem) => void;
     onplay?: (item: MusicItem) => void;
     oncontext?: (item: MusicItem, ev: MouseEvent) => void;
+    onartist?: (artist: ArtistLink) => void;
   } = $props();
 
   const img = $derived(thumb(item));
   const isMood = $derived(item.type === "mood" || !!item.color);
   const canPlay = $derived(
     !!item.videoId || item.type === "album" || item.type === "playlist" || !!item.playlistId || !!item.browseId,
+  );
+  const showArtistLinks = $derived(
+    item.type === "song" || item.type === "album" || item.type === "playlist",
   );
 
   function open() {
@@ -68,7 +74,11 @@
   </div>
   <div class="meta">
     <div class="title">{item.title}</div>
-    {#if item.subtitle}
+    {#if showArtistLinks && (item.artistLinks?.length || item.subtitle)}
+      <div class="sub">
+        <ArtistLinks artists={item.artistLinks} fallback={item.subtitle || ""} onopen={onartist} />
+      </div>
+    {:else if item.subtitle}
       <div class="sub">{item.subtitle}</div>
     {:else}
       <div class="sub">{item.type}</div>
@@ -102,7 +112,6 @@
     width: 128px;
     height: 128px;
     border-radius: var(--radius);
-    overflow: hidden;
     background: var(--md-sys-color-surface-container-highest);
     display: grid;
     place-items: center;
@@ -117,6 +126,7 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+    border-radius: inherit;
     transition: filter 0.15s var(--ease-out);
   }
   .card:hover .art img {
@@ -133,8 +143,8 @@
   }
   .play {
     position: absolute;
-    right: 6px;
-    bottom: 6px;
+    right: 4px;
+    bottom: 4px;
     width: 32px;
     height: 32px;
     border-radius: var(--radius);
@@ -145,7 +155,13 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.12s var(--ease-out);
-    z-index: 1;
+    z-index: 2;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  }
+  .art.round .play {
+    /* sit on the circle edge without being clipped */
+    right: -2px;
+    bottom: -2px;
   }
   .play:hover {
     filter: brightness(1.1);

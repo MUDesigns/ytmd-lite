@@ -1,4 +1,4 @@
-import type { BrowseResult, MusicItem } from "./types";
+import type { ArtistLink, BrowseResult, MusicItem } from "./types";
 
 export const API_BASE = "http://127.0.0.1:9847";
 
@@ -58,6 +58,49 @@ function artistsLine(artists: unknown): string {
       .join(", ");
   }
   return "";
+}
+
+export function parseArtistLinks(raw: Record<string, unknown>): ArtistLink[] {
+  const fromLinks = raw.artistLinks;
+  if (Array.isArray(fromLinks) && fromLinks.length) {
+    return fromLinks
+      .map((a) => {
+        if (!a || typeof a !== "object") return null;
+        const o = a as { name?: string; browseId?: string; id?: string };
+        const name = String(o.name || "").trim();
+        if (!name) return null;
+        const browseId = String(o.browseId || o.id || "").trim() || undefined;
+        return { name, browseId } satisfies ArtistLink;
+      })
+      .filter((a): a is ArtistLink => !!a);
+  }
+
+  const primary =
+    (raw.artistBrowseId && String(raw.artistBrowseId)) ||
+    (typeof raw.browseId === "string" && String(raw.browseId).startsWith("UC")
+      ? String(raw.browseId)
+      : undefined);
+
+  if (Array.isArray(raw.artists) && raw.artists.some((a) => a && typeof a === "object")) {
+    return raw.artists
+      .map((a, i) => {
+        if (!a || typeof a !== "object") return null;
+        const o = a as { name?: string; id?: string; browseId?: string };
+        const name = String(o.name || "").trim();
+        if (!name) return null;
+        const browseId =
+          String(o.browseId || o.id || "").trim() || (i === 0 ? primary : undefined);
+        return { name, browseId } satisfies ArtistLink;
+      })
+      .filter((a): a is ArtistLink => !!a);
+  }
+
+  const line = artistsLine(raw.artists);
+  if (!line) return [];
+  return line.split(",").map((name, i) => ({
+    name: name.trim(),
+    browseId: i === 0 ? primary : undefined,
+  })).filter((a) => a.name);
 }
 
 function colorFor(title: string): string {
@@ -131,9 +174,16 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
   const thumb = pickThumbUrl(raw);
   const title = String(raw.title || raw.artist || "Untitled");
 
+  const artistLinks = parseArtistLinks(raw);
+  const artistBrowseId =
+    (raw.artistBrowseId && String(raw.artistBrowseId)) ||
+    artistLinks.find((a) => a.browseId)?.browseId ||
+    undefined;
+
   const subtitle =
     (typeof raw.subtitle === "string" && raw.subtitle) ||
     artistsLine(raw.artists) ||
+    artistLinks.map((a) => a.name).join(", ") ||
     (raw.year ? String(raw.year) : "") ||
     (raw.count ? `${raw.count} tracks` : "") ||
     undefined;
@@ -149,6 +199,8 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
     videoId: playableVideoId,
     params: raw.params ? String(raw.params) : undefined,
     color: typeof raw.color === "string" ? raw.color : undefined,
+    artistBrowseId,
+    artistLinks: artistLinks.length ? artistLinks : undefined,
   };
 }
 
@@ -158,6 +210,8 @@ function mapTrack(t: Record<string, unknown>): MusicItem {
     videoId: t.videoId,
     title: t.title,
     artists: t.artists,
+    artistBrowseId: t.artistBrowseId,
+    artistLinks: t.artistLinks,
     album: t.album,
     thumbnail: t.thumbnail,
   });
@@ -265,17 +319,67 @@ export async function loadLibrary(): Promise<BrowseResult> {
   return { title: "Library", shelves, items: [] };
 }
 
-export async function search(query: string): Promise<BrowseResult> {
-  const data = await api<{ results?: Record<string, unknown>[] }>(
-    `/search?q=${encodeURIComponent(query)}`,
-  );
+export type SearchFilter = "all" | "songs" | "artists" | "albums" | "playlists" | "library";
+
+export async function search(
+  query: string,
+  filter: SearchFilter = "all",
+): Promise<BrowseResult> {
+  if (filter === "library") return searchLibrary(query);
+
+  const params = new URLSearchParams({ q: query });
+  if (filter !== "all") params.set("filter", filter);
+  const data = await api<{ results?: Record<string, unknown>[] }>(`/search?${params}`);
   const items = (data.results || []).map(mapItem);
+  const shelfTitle =
+    filter === "all"
+      ? "Results"
+      : filter.charAt(0).toUpperCase() + filter.slice(1);
   return {
     title: "Search",
     shelves: items.length
-      ? [{ type: "shelf", id: "search", title: "Results", thumbnails: [], items }]
+      ? [{ type: "shelf", id: `search-${filter}`, title: shelfTitle, thumbnails: [], items }]
       : [],
     items,
+  };
+}
+
+/** Filter the signed-in library (playlists / albums / artists / liked) by name. */
+export async function searchLibrary(query: string): Promise<BrowseResult> {
+  const q = query.trim().toLowerCase();
+  if (!q) return { title: "Library", shelves: [], items: [] };
+
+  const match = (item: MusicItem) =>
+    item.title.toLowerCase().includes(q) ||
+    (item.subtitle || "").toLowerCase().includes(q) ||
+    (item.artistLinks || []).some((a) => a.name.toLowerCase().includes(q));
+
+  const [lib, liked] = await Promise.all([
+    loadLibrary(),
+    api<{ tracks?: Record<string, unknown>[] }>("/liked?limit=500").catch(() => ({ tracks: [] })),
+  ]);
+
+  const shelves: MusicItem[] = [];
+  const likedItems = (liked.tracks || []).map(mapTrack).filter(match);
+  if (likedItems.length) {
+    shelves.push({
+      type: "shelf",
+      id: "lib-search-liked",
+      title: "Liked songs",
+      thumbnails: [],
+      items: likedItems,
+    });
+  }
+  for (const shelf of lib.shelves || []) {
+    const items = (shelf.items || []).filter(match);
+    if (items.length) {
+      shelves.push({ ...shelf, id: `lib-search-${shelf.id}`, items });
+    }
+  }
+  return {
+    title: "Library",
+    shelves,
+    items: shelves.flatMap((s) => s.items || []),
   };
 }
 
@@ -283,6 +387,33 @@ export async function searchSuggestions(query: string) {
   return api<{ suggestions: string[] }>(
     `/search/suggestions?q=${encodeURIComponent(query)}`,
   );
+}
+
+/** Look up an artist channel id by name when YouTube omitted it from the shelf/track. */
+export async function resolveArtist(name: string): Promise<ArtistLink | null> {
+  const q = name.trim();
+  if (!q) return null;
+  const data = await api<{ results?: Record<string, unknown>[] }>(
+    `/search?q=${encodeURIComponent(q)}&filter=artists`,
+  );
+  for (const raw of data.results || []) {
+    const item = mapItem({ ...raw, type: "artist" });
+    const browseId = item.browseId;
+    if (browseId?.startsWith("UC")) {
+      return { name: item.title || q, browseId };
+    }
+  }
+  // Fallback: mixed search may still surface the artist card
+  const mixed = await api<{ results?: Record<string, unknown>[] }>(
+    `/search?q=${encodeURIComponent(q)}`,
+  );
+  for (const raw of mixed.results || []) {
+    const item = mapItem(raw);
+    if (item.type === "artist" && item.browseId?.startsWith("UC")) {
+      return { name: item.title || q, browseId: item.browseId };
+    }
+  }
+  return null;
 }
 
 export async function likeSong(
@@ -294,6 +425,21 @@ export async function likeSong(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ rating, ...meta }),
+  });
+}
+
+export async function setArtistSubscribed(
+  browseId: string,
+  subscribed: boolean,
+  channelId?: string,
+) {
+  const path = subscribed
+    ? `/artist/${encodeURIComponent(browseId)}/subscribe`
+    : `/artist/${encodeURIComponent(browseId)}/unsubscribe`;
+  return api<{ ok: boolean }>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channelId: channelId || browseId }),
   });
 }
 
@@ -334,6 +480,8 @@ export async function browseDetail(opts: {
       thumbnail?: unknown;
       author?: string;
       artists?: unknown;
+      artistBrowseId?: string;
+      artistLinks?: unknown;
       error?: string;
     }>(`${isRadioMix ? "/radio" : "/playlist"}/${encodeURIComponent(pid)}`);
     if (data.error) throw new Error(data.error);
@@ -342,12 +490,15 @@ export async function browseDetail(opts: {
       pickThumbUrl(data as Record<string, unknown>) ||
       items.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
       "";
+    const artistLinks = parseArtistLinks(data as Record<string, unknown>);
     return {
       title: data.title || opts.title || (isRadioMix ? "Mix" : "Playlist"),
       subtitle: artistsLine(data.artists) || (typeof data.author === "string" ? data.author : undefined),
       shelves: [],
       items,
       thumbnails: cover ? [cover] : [],
+      artistBrowseId: data.artistBrowseId ? String(data.artistBrowseId) : artistLinks[0]?.browseId,
+      artistLinks: artistLinks.length ? artistLinks : undefined,
     };
   }
 
@@ -360,6 +511,10 @@ export async function browseDetail(opts: {
       singles?: Record<string, unknown>[];
       thumbnails?: unknown;
       thumbnail?: unknown;
+      monthlyListeners?: string;
+      subscribers?: string;
+      subscribed?: boolean;
+      channelId?: string;
     }>(`/artist/${encodeURIComponent(bid)}`);
     const tracks = (data.tracks || []).map(mapTrack);
     const albums = [...(data.albums || []), ...(data.singles || [])].map((a) =>
@@ -380,11 +535,23 @@ export async function browseDetail(opts: {
       tracks.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
       albums.find((a) => a.thumbnails?.[0])?.thumbnails?.[0] ||
       "";
+    const listeners = String(data.monthlyListeners || "").trim();
+    const subs = String(data.subscribers || "").trim();
+    let meta: string | undefined;
+    if (listeners) {
+      meta = /listener/i.test(listeners) ? listeners : `${listeners} monthly listeners`;
+    } else if (subs) {
+      meta = /subscriber/i.test(subs) ? subs : `${subs} subscribers`;
+    }
     return {
       title: data.name || opts.title || "Artist",
       shelves,
       items: tracks,
       thumbnails: cover ? [cover] : [],
+      meta,
+      kind: "artist",
+      subscribed: !!data.subscribed,
+      channelId: data.channelId ? String(data.channelId) : bid,
     };
   }
 
@@ -395,18 +562,23 @@ export async function browseDetail(opts: {
       thumbnails?: unknown;
       thumbnail?: unknown;
       artists?: unknown;
+      artistBrowseId?: string;
+      artistLinks?: unknown;
     }>(`/album/${encodeURIComponent(bid)}`);
     const items = (data.tracks || []).map(mapTrack);
     const cover =
       pickThumbUrl(data as Record<string, unknown>) ||
       items.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
       "";
+    const artistLinks = parseArtistLinks(data as Record<string, unknown>);
     return {
       title: data.title || opts.title || "Album",
-      subtitle: artistsLine(data.artists),
+      subtitle: artistsLine(data.artists) || artistLinks.map((a) => a.name).join(", "),
       shelves: [],
       items,
       thumbnails: cover ? [cover] : [],
+      artistBrowseId: data.artistBrowseId ? String(data.artistBrowseId) : artistLinks[0]?.browseId,
+      artistLinks: artistLinks.length ? artistLinks : undefined,
     };
   }
 

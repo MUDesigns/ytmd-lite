@@ -1,22 +1,32 @@
 <script lang="ts">
-  import type { PlayerState } from "$lib/types";
+  import type { ArtistLink, PlayerState } from "$lib/types";
   import { thumb } from "$lib/api";
   import * as playerCtl from "$lib/player";
+  import ArtistLinks from "./ArtistLinks.svelte";
 
   let {
     player,
     onqueue,
     onlike,
+    onartist,
   }: {
     player: PlayerState;
     onqueue?: () => void;
     onlike?: () => void;
+    onartist?: (artist: ArtistLink) => void;
   } = $props();
 
   const playing = $derived(player.trackState === "Playing");
   const buffering = $derived(player.trackState === "Buffering");
   const title = $derived(player.videoDetails?.title ?? "idle");
   const artist = $derived(player.videoDetails?.author || "—");
+  const artistLinks = $derived(
+    player.videoDetails?.channelId && player.videoDetails?.author
+      ? [{ name: player.videoDetails.author, browseId: player.videoDetails.channelId }]
+      : player.videoDetails?.author
+        ? [{ name: player.videoDetails.author }]
+        : [],
+  );
   const duration = $derived(player.videoDetails?.durationSeconds ?? 0);
   const progress = $derived(player.videoProgress ?? 0);
   const progressPct = $derived(duration > 0 ? Math.min(100, (progress / duration) * 100) : 0);
@@ -114,7 +124,9 @@
             <span class="buf-hint"># waiting for audio bytes…</span>
           {:else}
             <span class="flag">--artist</span>
-            <span class="val">{artist}</span>
+            <span class="val">
+              <ArtistLinks artists={artistLinks} fallback={artist} onopen={onartist} />
+            </span>
           {/if}
         </div>
       </div>

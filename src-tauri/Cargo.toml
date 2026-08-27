@@ -1,6 +1,6 @@
 [package]
 name = "ytmd-lite"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight YouTube Music Desktop client with Last.fm"
 authors = ["ytmd-lite"]
 edition = "2021"

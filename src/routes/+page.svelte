@@ -11,13 +11,17 @@
     loadLibrary,
     loadRecentSearches,
     pushRecentSearch,
+    resolveArtist,
     search,
     searchSuggestions,
+    setArtistSubscribed,
     thumb,
     validateAuth,
+    type SearchFilter,
   } from "$lib/api";
   import * as playerCtl from "$lib/player";
   import type {
+    ArtistLink,
     BrowseResult,
     DetailTarget,
     DiscordRpcStatus,
@@ -30,6 +34,7 @@
   import PlayerDock from "$lib/ui/PlayerDock.svelte";
   import ShelfRow from "$lib/ui/ShelfRow.svelte";
   import AccentPicker from "$lib/ui/AccentPicker.svelte";
+  import ArtistLinks from "$lib/ui/ArtistLinks.svelte";
   import ContextMenu, { type MenuAction } from "$lib/ui/ContextMenu.svelte";
   import { applyAccent, DEFAULT_ACCENT, normalizeAccent } from "$lib/accent";
   import { checkForAppUpdates } from "$lib/updater";
@@ -69,6 +74,7 @@
   let searchData = $state<BrowseResult | null>(null);
   let searchBusy = $state(false);
   let searchSuggestionsList = $state<string[]>([]);
+  let searchFilter = $state<SearchFilter>("all");
   let recentSearches = $state<string[]>(typeof localStorage !== "undefined" ? loadRecentSearches() : []);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let detail = $state<DetailTarget | null>(null);
@@ -76,6 +82,7 @@
   let detailFrom = $state<Panel>("home");
   let detailItem = $state<MusicItem | null>(null);
   let likedIds = $state<Set<string>>(new Set());
+  let subscribeBusy = $state(false);
   let ctx = $state<{ open: boolean; x: number; y: number; item: MusicItem | null }>({
     open: false,
     x: 0,
@@ -92,13 +99,13 @@
     if (panel === "detail" && (detail?.title || detailData?.title)) {
       return `${detailFrom}/${detail?.title || detailData?.title || "detail"}`;
     }
-    if (panel === "home" && searchQuery.trim()) {
-      return `home/search/${searchQuery.trim()}`;
+    if (searchQuery.trim()) {
+      return `search/${searchQuery.trim()}`;
     }
     return panel;
   });
 
-  const homeSearching = $derived(panel === "home" && !!searchQuery.trim());
+  const isSearching = $derived(!!searchQuery.trim());
   const detailCover = $derived(
     thumb({ thumbnails: detailData?.thumbnails }) ||
       thumb(detailData?.items?.[0]) ||
@@ -301,7 +308,9 @@
       else if (target === "explore") exploreData = await loadExplore();
       else if (target === "library") libraryData = await loadLibrary();
       else if (target === "detail" && detail) {
-        detailData = await browseDetail(detail);
+        // Ensure like hearts match the signed-in account before painting tracks
+        const [, data] = await Promise.all([refreshLiked(), browseDetail(detail)]);
+        detailData = data;
       }
       if (!engine.signedIn) {
         const auth = await validateAuth();
@@ -380,6 +389,53 @@
     }
     if (item.videoId) {
       await playFromUi(item);
+    }
+  }
+
+  async function openArtist(artist: ArtistLink) {
+    let browseId = artist.browseId;
+    let title = artist.name;
+    if (!browseId) {
+      statusMsg = `Finding ${artist.name}…`;
+      try {
+        const resolved = await resolveArtist(artist.name);
+        if (!resolved?.browseId) {
+          statusMsg = `Couldn't find artist “${artist.name}”`;
+          return;
+        }
+        browseId = resolved.browseId;
+        title = resolved.name || title;
+      } catch (e) {
+        statusMsg = String(e);
+        return;
+      }
+    }
+    await openItem({
+      type: "artist",
+      id: browseId,
+      title,
+      browseId,
+      thumbnails: [],
+    });
+  }
+
+  async function toggleArtistSubscribe() {
+    const browseId = detail?.browseId || detailItem?.browseId || detailData?.channelId;
+    if (!browseId || detailData?.kind !== "artist" || subscribeBusy) return;
+    const next = !detailData.subscribed;
+    subscribeBusy = true;
+    const prev = detailData.subscribed;
+    detailData = { ...detailData, subscribed: next };
+    try {
+      await setArtistSubscribed(browseId, next, detailData.channelId);
+      statusMsg = next
+        ? `Subscribed to ${detailData.title || "artist"}`
+        : `Unsubscribed from ${detailData.title || "artist"}`;
+    } catch (e) {
+      detailData = { ...detailData, subscribed: prev };
+      statusMsg = String(e);
+    } finally {
+      subscribeBusy = false;
     }
   }
 
@@ -516,6 +572,20 @@
     if (canOpen) {
       actions.push({ id: "open", label: "Open", icon: "open_in_new" });
     }
+    const artist =
+      item.artistLinks?.find((a) => a.name) ||
+      (item.artistBrowseId
+        ? { name: item.subtitle || "Artist", browseId: item.artistBrowseId }
+        : item.subtitle
+          ? { name: item.subtitle.split(",")[0].trim() }
+          : null);
+    if (artist?.name) {
+      actions.push({
+        id: "artist",
+        label: `Go to ${artist.name}`,
+        icon: "person",
+      });
+    }
     if (isSong && item.videoId) {
       actions.push({ id: "sep1", label: "", separator: true });
       actions.push({
@@ -536,12 +606,30 @@
     else if (id === "queue") await queueItem(item, false);
     else if (id === "next") await queueItem(item, true);
     else if (id === "open") await openItem(item);
-    else if (id === "like") await toggleLikeFor(item.videoId, item);
+    else if (id === "artist") {
+      const artist =
+        item.artistLinks?.find((a) => a.name) ||
+        (item.artistBrowseId
+          ? { name: item.subtitle || "Artist", browseId: item.artistBrowseId }
+          : item.subtitle
+            ? { name: item.subtitle.split(",")[0].trim() }
+            : null);
+      if (artist?.name) void openArtist(artist);
+    } else if (id === "like") await toggleLikeFor(item.videoId, item);
   }
 
   async function playQueueIndex(index: number) {
     await playerCtl.playQueueIndex(index);
   }
+
+  const SEARCH_FILTERS: { id: SearchFilter; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "songs", label: "Songs" },
+    { id: "artists", label: "Artists" },
+    { id: "albums", label: "Albums" },
+    { id: "playlists", label: "Playlists" },
+    { id: "library", label: "Library" },
+  ];
 
   function onSearchInput() {
     if (searchTimer) clearTimeout(searchTimer);
@@ -556,15 +644,18 @@
     }, 320);
   }
 
-  async function runLiveSearch(q: string) {
+  async function runLiveSearch(q: string, filter: SearchFilter = searchFilter) {
     searchBusy = true;
     loadError = null;
     try {
+      const wantSuggestions = filter !== "library";
       const [results, suggestions] = await Promise.all([
-        search(q),
-        searchSuggestions(q).catch(() => ({ suggestions: [] as string[] })),
+        search(q, filter),
+        wantSuggestions
+          ? searchSuggestions(q).catch(() => ({ suggestions: [] as string[] }))
+          : Promise.resolve({ suggestions: [] as string[] }),
       ]);
-      if (searchQuery.trim() !== q) return; // stale
+      if (searchQuery.trim() !== q || searchFilter !== filter) return; // stale
       searchData = results;
       searchSuggestionsList = suggestions.suggestions ?? [];
     } catch (e) {
@@ -584,8 +675,14 @@
   function applySearchTerm(term: string) {
     searchQuery = term;
     recentSearches = pushRecentSearch(term) ?? loadRecentSearches();
-    if (panel !== "home") setPanel("home");
     void runLiveSearch(term);
+  }
+
+  function setSearchFilter(next: SearchFilter) {
+    if (searchFilter === next) return;
+    searchFilter = next;
+    const q = searchQuery.trim();
+    if (q) void runLiveSearch(q, next);
   }
 
   function clearSearch() {
@@ -791,7 +888,7 @@
   </aside>
 
   <main class="content">
-    {#if !engine.signedIn && (panel === "home" || panel === "explore" || panel === "library")}
+    {#if !engine.signedIn && (panel === "home" || panel === "explore" || panel === "library" || isSearching)}
       <div class="auth-banner">
         <span class="material-symbols-outlined">login</span>
         <div>
@@ -801,135 +898,144 @@
         <button class="btn primary" onclick={() => openLogin()}>Sign in</button>
       </div>
     {/if}
-    {#if panel === "home" || panel === "explore" || panel === "library" || panel === "detail" || panel === "queue"}
+
+    <form
+      class="search-bar"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void runSearch();
+      }}
+    >
+      <span class="material-symbols-outlined">search</span>
+      <input
+        bind:value={searchQuery}
+        placeholder="search — songs, albums, artists…"
+        oninput={onSearchInput}
+      />
+      {#if searchQuery.trim()}
+        <button class="icon-btn" type="button" title="Clear" onclick={clearSearch}>
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      {/if}
+      <button class="btn primary" type="submit" disabled={searchBusy}>Search</button>
+    </form>
+
+    <div class="search-filters" role="tablist" aria-label="Search filter">
+      {#each SEARCH_FILTERS as f (f.id)}
+        <button
+          type="button"
+          class="filter-chip"
+          class:active={searchFilter === f.id}
+          role="tab"
+          aria-selected={searchFilter === f.id}
+          onclick={() => setSearchFilter(f.id)}
+        >
+          {f.label}
+        </button>
+      {/each}
+    </div>
+
+    {#if !isSearching && recentSearches.length && (panel === "home" || panel === "explore" || panel === "library")}
+      <div class="chips-block">
+        <div class="chips-label">Recent</div>
+        <div class="chips">
+          {#each recentSearches as term}
+            <button type="button" class="chip" onclick={() => applySearchTerm(term)}>{term}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if isSearching && panel !== "detail" && searchSuggestionsList.length}
+      <div class="chips-block">
+        <div class="chips-label">Suggestions</div>
+        <div class="chips">
+          {#each searchSuggestionsList as term}
+            <button type="button" class="chip" onclick={() => applySearchTerm(term)}>{term}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if panel === "detail"}
       <div class="browse">
-        {#if panel === "home"}
-          <form
-            class="search-bar"
-            onsubmit={(e) => {
-              e.preventDefault();
-              void runSearch();
-            }}
-          >
-            <span class="material-symbols-outlined">search</span>
-            <input
-              bind:value={searchQuery}
-              placeholder="search — songs, albums, artists…"
-              oninput={onSearchInput}
-            />
-            {#if searchQuery.trim()}
-              <button class="icon-btn" type="button" title="Clear" onclick={clearSearch}>
-                <span class="material-symbols-outlined">close</span>
-              </button>
+        <button class="back" onclick={() => setPanel(detailFrom || "home")}>
+          <span class="material-symbols-outlined">arrow_back</span>
+          Back
+        </button>
+        <div class="detail-hero">
+          <div class="detail-art">
+            {#if detailCover}
+              <img src={detailCover} alt="" referrerpolicy="no-referrer" />
+            {:else}
+              <span class="material-symbols-outlined">album</span>
             {/if}
-            <button class="btn primary" type="submit" disabled={searchBusy}>Search</button>
-          </form>
-
-          {#if !searchQuery.trim() && recentSearches.length}
-            <div class="chips-block">
-              <div class="chips-label">Recent</div>
-              <div class="chips">
-                {#each recentSearches as term}
-                  <button type="button" class="chip" onclick={() => applySearchTerm(term)}>{term}</button>
-                {/each}
+          </div>
+          <div class="detail-meta">
+            <div class="detail-kind muted">{detailItem?.type || "collection"}</div>
+            <h1 class="detail-title">{detailData?.title || detail?.title || "Collection"}</h1>
+            {#if detailData?.artistLinks?.length || detailData?.subtitle}
+              <div class="detail-sub">
+                <ArtistLinks
+                  artists={detailData?.artistLinks}
+                  fallback={detailData?.subtitle || ""}
+                  onopen={openArtist}
+                />
               </div>
-            </div>
-          {/if}
-
-          {#if searchQuery.trim() && searchSuggestionsList.length}
-            <div class="chips-block">
-              <div class="chips-label">Suggestions</div>
-              <div class="chips">
-                {#each searchSuggestionsList as term}
-                  <button type="button" class="chip" onclick={() => applySearchTerm(term)}>{term}</button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-        {/if}
-
-        {#if panel === "detail"}
-          <button class="back" onclick={() => setPanel(detailFrom || "home")}>
-            <span class="material-symbols-outlined">arrow_back</span>
-            Back
-          </button>
-          <div class="detail-hero">
-            <div class="detail-art">
-              {#if detailCover}
-                <img src={detailCover} alt="" referrerpolicy="no-referrer" />
-              {:else}
-                <span class="material-symbols-outlined">album</span>
+            {/if}
+            {#if detailData?.kind === "artist"}
+              {#if detailData.meta}
+                <div class="detail-sub muted">{detailData.meta}</div>
               {/if}
-            </div>
-            <div class="detail-meta">
-              <div class="detail-kind muted">{detailItem?.type || "collection"}</div>
-              <h1 class="detail-title">{detailData?.title || detail?.title || "Collection"}</h1>
-              {#if detailData?.subtitle}
-                <div class="detail-sub">{detailData.subtitle}</div>
-              {/if}
+            {:else}
               <div class="detail-sub muted">
                 {detailTrackCount} track{detailTrackCount === 1 ? "" : "s"}
               </div>
-              <div class="detail-actions">
-                <button
-                  class="btn primary"
-                  disabled={!detailTrackCount || loading}
-                  onclick={() => {
-                    if (detailItem) void playFromUi(detailItem);
-                    else if (detailData?.items?.length) void playerCtl.playItems(detailData.items, 0);
-                  }}
-                >
-                  <span class="material-symbols-outlined">play_arrow</span>
-                  Play
-                </button>
+            {/if}
+            <div class="detail-actions">
+              <button
+                class="btn primary"
+                disabled={!detailTrackCount || loading}
+                onclick={() => {
+                  if (detailItem) void playFromUi(detailItem);
+                  else if (detailData?.items?.length) void playerCtl.playItems(detailData.items, 0);
+                }}
+              >
+                <span class="material-symbols-outlined">play_arrow</span>
+                Play
+              </button>
+              <button
+                class="btn"
+                disabled={!detailTrackCount || loading}
+                onclick={() => shufflePlayItem(detailItem)}
+              >
+                <span class="material-symbols-outlined">shuffle</span>
+                Shuffle
+              </button>
+              <button
+                class="btn"
+                disabled={!detailTrackCount || loading}
+                onclick={() => detailItem && queueItem(detailItem)}
+              >
+                <span class="material-symbols-outlined">playlist_add</span>
+                Add to queue
+              </button>
+              {#if detailData?.kind === "artist"}
                 <button
                   class="btn"
-                  disabled={!detailTrackCount || loading}
-                  onclick={() => shufflePlayItem(detailItem)}
+                  class:subscribed={detailData.subscribed}
+                  disabled={subscribeBusy || loading}
+                  onclick={() => void toggleArtistSubscribe()}
                 >
-                  <span class="material-symbols-outlined">shuffle</span>
-                  Shuffle
+                  <span class="material-symbols-outlined">
+                    {detailData.subscribed ? "notifications_active" : "person_add"}
+                  </span>
+                  {detailData.subscribed ? "Subscribed" : "Subscribe"}
                 </button>
-                <button
-                  class="btn"
-                  disabled={!detailTrackCount || loading}
-                  onclick={() => detailItem && queueItem(detailItem)}
-                >
-                  <span class="material-symbols-outlined">playlist_add</span>
-                  Add to queue
-                </button>
-              </div>
+              {/if}
             </div>
           </div>
-        {:else if panel === "queue"}
-          <div class="page-head">
-            <h1 class="page-title">Queue</h1>
-            <button
-              class="btn"
-              disabled={!player.queue?.length}
-              onclick={() => {
-                playerCtl.clearQueue();
-                statusMsg = "Queue cleared";
-              }}
-            >
-              Clear
-            </button>
-          </div>
-        {:else if panel === "home" && homeSearching}
-          <div class="page-head">
-            <h1 class="page-title">Results</h1>
-            <button class="icon-btn" title="Clear search" onclick={clearSearch}>
-              <span class="material-symbols-outlined">close</span>
-            </button>
-          </div>
-        {:else if panel !== "home"}
-          <div class="page-head">
-            <h1 class="page-title">{panel}</h1>
-            <button class="icon-btn" title="Refresh" onclick={() => refreshPanel(panel)} disabled={loading}>
-              <span class="material-symbols-outlined">refresh</span>
-            </button>
-          </div>
-        {/if}
+        </div>
 
         {#if loadError}
           <div class="callout error">{loadError}</div>
@@ -938,54 +1044,7 @@
           </button>
         {/if}
 
-        <div class="browse-body" class:dimmed={loading || searchBusy}>
-        {#if panel === "queue"}
-          <div class="queue-list">
-            {#if !(player.queue && player.queue.length)}
-              <p class="muted">Queue is empty — play something from Home.</p>
-            {:else}
-              {#each player.queue as item, index (item.videoId + index)}
-                <button
-                  class="queue-row"
-                  class:selected={item.selected || index === player.queueIndex}
-                  onclick={() => playQueueIndex(index)}
-                >
-                  <div class="q-art">
-                    {#if thumb(item)}
-                      <img src={thumb(item)} alt="" referrerpolicy="no-referrer" />
-                    {:else}
-                      <span class="material-symbols-outlined">music_note</span>
-                    {/if}
-                  </div>
-                  <div class="q-meta">
-                    <div class="q-title">{item.title}</div>
-                    <div class="q-sub">{item.author}</div>
-                  </div>
-                  <span class="q-idx">{index + 1}</span>
-                </button>
-              {/each}
-            {/if}
-          </div>
-        {:else if panel === "home" && homeSearching}
-          {#if !searchBusy && !shelvesOf(searchData).length}
-            <p class="muted">No results for “{searchQuery.trim()}”.</p>
-          {/if}
-          {#each shelvesOf(searchData) as shelf (shelf.id + shelf.title)}
-            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} />
-          {/each}
-        {:else if panel === "home"}
-          {#each shelvesOf(homeData) as shelf (shelf.id + shelf.title)}
-            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} />
-          {/each}
-        {:else if panel === "explore"}
-          {#each shelvesOf(exploreData) as shelf (shelf.id + shelf.title)}
-            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} />
-          {/each}
-        {:else if panel === "library"}
-          {#each shelvesOf(libraryData) as shelf (shelf.id + shelf.title)}
-            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} />
-          {/each}
-        {:else if panel === "detail"}
+        <div class="browse-body" class:dimmed={loading}>
           {#if detailData?.items?.length}
             <div class="track-list">
               {#each detailData.items as item, i (item.id + i)}
@@ -1011,21 +1070,25 @@
                   </div>
                   <div class="t-meta">
                     <div class="t-title">{item.title}</div>
-                    <div class="t-sub">{item.subtitle || item.type}</div>
+                    <div class="t-sub">
+                      <ArtistLinks
+                        artists={item.artistLinks}
+                        fallback={item.subtitle || item.type}
+                        onopen={openArtist}
+                      />
+                    </div>
                   </div>
                   <button
                     type="button"
                     class="icon-btn like-btn"
-                    class:on={item.videoId && likedIds.has(item.videoId)}
-                    title="Like"
+                    class:on={!!(item.videoId && likedIds.has(item.videoId))}
+                    title={item.videoId && likedIds.has(item.videoId) ? "Unlike" : "Like"}
                     onclick={(e) => {
                       e.stopPropagation();
                       void toggleLikeFor(item.videoId, item);
                     }}
                   >
-                    <span class="material-symbols-outlined">
-                      {item.videoId && likedIds.has(item.videoId) ? "favorite" : "favorite_border"}
-                    </span>
+                    <span class="material-symbols-outlined">favorite</span>
                   </button>
                   <span class="material-symbols-outlined">play_arrow</span>
                 </div>
@@ -1034,13 +1097,134 @@
           {/if}
           {#each shelvesOf(detailData) as shelf (shelf.id + shelf.title)}
             {#if !(detailData?.items?.length && shelf.id === "items")}
-              <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} />
+              <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
             {/if}
+          {/each}
+        </div>
+
+        {#if loading}
+          <div class="spinner-overlay" aria-busy="true" aria-label="Loading">
+            <span class="spinner"></span>
+          </div>
+        {/if}
+      </div>
+    {:else if isSearching}
+      <div class="browse">
+        <div class="page-head">
+          <h1 class="page-title">
+            {searchFilter === "all" ? "Results" : searchFilter}
+          </h1>
+          <button class="icon-btn" title="Clear search" onclick={clearSearch}>
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        {#if loadError}
+          <div class="callout error">{loadError}</div>
+          <button class="btn" onclick={() => (engine.signedIn ? void runSearch() : openLogin())}>
+            {engine.signedIn ? "Retry" : "Sign in"}
+          </button>
+        {/if}
+
+        <div class="browse-body" class:dimmed={searchBusy}>
+          {#if !searchBusy && !shelvesOf(searchData).length}
+            <p class="muted">No results for “{searchQuery.trim()}”.</p>
+          {/if}
+          {#each shelvesOf(searchData) as shelf (shelf.id + shelf.title)}
+            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
+          {/each}
+        </div>
+
+        {#if searchBusy}
+          <div class="spinner-overlay" aria-busy="true" aria-label="Loading">
+            <span class="spinner"></span>
+          </div>
+        {/if}
+      </div>
+    {:else if panel === "home" || panel === "explore" || panel === "library" || panel === "queue"}
+      <div class="browse">
+        {#if panel === "queue"}
+          <div class="page-head">
+            <h1 class="page-title">Queue</h1>
+            <button
+              class="btn"
+              disabled={!player.queue?.length}
+              onclick={() => {
+                playerCtl.clearQueue();
+                statusMsg = "Queue cleared";
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        {:else if panel !== "home"}
+          <div class="page-head">
+            <h1 class="page-title">{panel}</h1>
+            <button class="icon-btn" title="Refresh" onclick={() => refreshPanel(panel)} disabled={loading}>
+              <span class="material-symbols-outlined">refresh</span>
+            </button>
+          </div>
+        {/if}
+
+        {#if loadError}
+          <div class="callout error">{loadError}</div>
+          <button class="btn" onclick={() => (engine.signedIn ? refreshPanel() : openLogin())}>
+            {engine.signedIn ? "Retry" : "Sign in"}
+          </button>
+        {/if}
+
+        <div class="browse-body" class:dimmed={loading}>
+        {#if panel === "queue"}
+          <div class="queue-list">
+            {#if !(player.queue && player.queue.length)}
+              <p class="muted">Queue is empty — play something from Home.</p>
+            {:else}
+              {#each player.queue as item, index (item.videoId + index)}
+                <button
+                  class="queue-row"
+                  class:selected={item.selected || index === player.queueIndex}
+                  onclick={() => playQueueIndex(index)}
+                >
+                  <div class="q-art">
+                    {#if thumb(item)}
+                      <img src={thumb(item)} alt="" referrerpolicy="no-referrer" />
+                    {:else}
+                      <span class="material-symbols-outlined">music_note</span>
+                    {/if}
+                  </div>
+                  <div class="q-meta">
+                    <div class="q-title">{item.title}</div>
+                    <div class="q-sub">
+                      <ArtistLinks
+                        artists={item.channelId
+                          ? [{ name: item.author, browseId: item.channelId }]
+                          : []}
+                        fallback={item.author}
+                        onopen={openArtist}
+                      />
+                    </div>
+                  </div>
+                  <span class="q-idx">{index + 1}</span>
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {:else if panel === "home"}
+          {#each shelvesOf(homeData) as shelf (shelf.id + shelf.title)}
+            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
+          {/each}
+        {:else if panel === "explore"}
+          {#each shelvesOf(exploreData) as shelf (shelf.id + shelf.title)}
+            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
+          {/each}
+        {:else if panel === "library"}
+          {#each shelvesOf(libraryData) as shelf (shelf.id + shelf.title)}
+            <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
           {/each}
         {/if}
         </div>
 
-        {#if loading || searchBusy}
+        {#if loading}
           <div class="spinner-overlay" aria-busy="true" aria-label="Loading">
             <span class="spinner"></span>
           </div>
@@ -1185,7 +1369,12 @@
     {/if}
   </main>
 
-  <PlayerDock {player} onqueue={() => setPanel("queue")} onlike={toggleLikeCurrent} />
+  <PlayerDock
+    {player}
+    onqueue={() => setPanel("queue")}
+    onlike={toggleLikeCurrent}
+    onartist={openArtist}
+  />
 
   <ContextMenu
     open={ctx.open}
@@ -1323,6 +1512,9 @@
     overflow: auto;
     background: var(--md-sys-color-surface);
     position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
   .content.auth-open {
     overflow: hidden;
@@ -1330,6 +1522,51 @@
   .auth-banner {
     height: 56px;
     box-sizing: border-box;
+    flex-shrink: 0;
+  }
+  .content > .search-bar,
+  .content > .search-filters,
+  .content > .chips-block {
+    flex-shrink: 0;
+    margin-left: 20px;
+    margin-right: 20px;
+  }
+  .content > .search-bar {
+    margin-top: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--md-sys-color-surface);
+  }
+  .content > .chips-block {
+    margin-top: 0;
+  }
+  .search-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 10px;
+  }
+  .filter-chip {
+    height: 24px;
+    padding: 0 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--md-sys-color-outline);
+    background: var(--md-sys-color-surface-container-low);
+    color: var(--md-sys-color-on-surface-variant);
+    font: inherit;
+    font-size: 11px;
+    text-transform: lowercase;
+    cursor: pointer;
+  }
+  .filter-chip:hover {
+    border-color: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-surface);
+  }
+  .filter-chip.active {
+    background: color-mix(in srgb, var(--md-sys-color-primary) 18%, transparent);
+    border-color: var(--md-sys-color-primary);
+    color: var(--md-sys-color-primary);
   }
   .browse,
   .panel {
@@ -1337,6 +1574,8 @@
     width: 100%;
     max-width: none;
     position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
   }
   .browse-body.dimmed {
     opacity: 0.45;
@@ -1534,6 +1773,11 @@
   .detail-actions .material-symbols-outlined {
     font-size: 16px;
   }
+  .detail-actions .btn.subscribed {
+    color: var(--md-sys-color-primary);
+    border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, var(--md-sys-color-outline));
+    background: color-mix(in srgb, var(--md-sys-color-primary) 12%, transparent);
+  }
   .queue-list,
   .track-list {
     display: flex;
@@ -1593,6 +1837,10 @@
   .like-btn.on,
   .track-row.liked .like-btn {
     color: var(--md-sys-color-primary);
+  }
+  .like-btn.on .material-symbols-outlined,
+  .track-row.liked .like-btn .material-symbols-outlined {
+    font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24;
   }
   .q-meta,
   .t-meta {

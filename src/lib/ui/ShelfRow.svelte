@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { MusicItem } from "$lib/types";
+  import type { ArtistLink, MusicItem } from "$lib/types";
   import MusicCard from "./MusicCard.svelte";
 
   let {
@@ -7,11 +7,13 @@
     onopen,
     onplay,
     oncontext,
+    onartist,
   }: {
     shelf: MusicItem;
     onopen?: (item: MusicItem) => void;
     onplay?: (item: MusicItem) => void;
     oncontext?: (item: MusicItem, ev: MouseEvent) => void;
+    onartist?: (artist: ArtistLink) => void;
   } = $props();
 
   const items = $derived(shelf.items ?? []);
@@ -22,7 +24,7 @@
     <h2>{shelf.title}</h2>
     <div class="row">
       {#each items as item (item.id + item.title)}
-        <MusicCard {item} {onopen} {onplay} {oncontext} />
+        <MusicCard {item} {onopen} {onplay} {oncontext} {onartist} />
       {/each}
     </div>
   </section>
