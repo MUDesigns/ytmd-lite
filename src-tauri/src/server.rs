@@ -1,7 +1,8 @@
 //! Spawn / attach to the local YT Music API (ytmusicapi + yt-dlp) on :9847.
-//! Backend source lives in `python-backend/` (adapted from Kodama).
+//! Prefer the bundled `ytmd-backend` sidecar in release builds; fall back to
+//! `python-backend/server.py` for local development.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -24,70 +25,75 @@ fn port_open() -> bool {
     .is_ok()
 }
 
-fn server_candidates(resource_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-    // Dev: lite/python-backend/server.py (repo root next to src-tauri)
-    out.push(manifest.join("..").join("python-backend").join("server.py"));
-    // Legacy monorepo layouts
-    out.push(
-        manifest
-            .join("..")
-            .join("..")
-            .join("Kodama")
-            .join("python-backend")
-            .join("server.py"),
-    );
-
-    if let Some(res) = resource_dir {
-        out.push(res.join("python-backend").join("server.py"));
-        out.push(res.join("server.py"));
-        #[cfg(windows)]
-        {
-            out.push(res.join("ytmd-backend.exe"));
-            out.push(res.join("kodama-server.exe"));
-        }
-        #[cfg(not(windows))]
-        {
-            out.push(res.join("ytmd-backend"));
-            out.push(res.join("kodama-server"));
-        }
+fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !out.iter().any(|p| p == &path) {
+        out.push(path);
     }
+}
+
+fn push_sidecars(out: &mut Vec<PathBuf>, dir: &Path) {
+    #[cfg(windows)]
+    {
+        push_unique(out, dir.join("ytmd-backend.exe"));
+        push_unique(out, dir.join("kodama-server.exe"));
+        push_unique(out, dir.join("resources").join("ytmd-backend.exe"));
+        push_unique(out, dir.join("resources").join("kodama-server.exe"));
+    }
+    #[cfg(not(windows))]
+    {
+        push_unique(out, dir.join("ytmd-backend"));
+        push_unique(out, dir.join("kodama-server"));
+        push_unique(out, dir.join("resources").join("ytmd-backend"));
+        push_unique(out, dir.join("resources").join("kodama-server"));
+    }
+}
+
+fn push_python_sources(out: &mut Vec<PathBuf>, dir: &Path) {
+    push_unique(out, dir.join("python-backend").join("server.py"));
+    push_unique(out, dir.join("_up_").join("python-backend").join("server.py"));
+    push_unique(out, dir.join("server.py"));
+}
+
+fn server_candidates(resource_dir: Option<&Path>) -> Vec<PathBuf> {
+    // Sidecars first (self-contained release), then Python sources (dev).
+    let mut bins = Vec::new();
+    let mut pys = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            #[cfg(windows)]
-            {
-                out.push(dir.join("ytmd-backend.exe"));
-                out.push(dir.join("kodama-server.exe"));
+            push_sidecars(&mut bins, dir);
+            push_python_sources(&mut pys, dir);
+            // NSIS / MSI sometimes nest resources one level up from a versioned folder
+            if let Some(parent) = dir.parent() {
+                push_sidecars(&mut bins, parent);
+                push_python_sources(&mut pys, parent);
             }
-            #[cfg(not(windows))]
-            {
-                out.push(dir.join("ytmd-backend"));
-                out.push(dir.join("kodama-server"));
-            }
-            out.push(dir.join("python-backend").join("server.py"));
-            out.push(
-                dir.join("..")
-                    .join("..")
-                    .join("..")
-                    .join("python-backend")
-                    .join("server.py"),
-            );
         }
     }
 
-    // Sidecar next to src-tauri during `tauri dev` / local builds
-    out.push(manifest.join("binaries").join("ytmd-backend.exe"));
-    out.push(manifest.join("binaries").join("ytmd-backend"));
-    out.push(manifest.join("binaries").join("kodama-server.exe"));
-    out.push(manifest.join("binaries").join("kodama-server"));
+    if let Some(res) = resource_dir {
+        push_sidecars(&mut bins, res);
+        push_python_sources(&mut pys, res);
+        if let Some(parent) = res.parent() {
+            push_sidecars(&mut bins, parent);
+            push_python_sources(&mut pys, parent);
+        }
+    }
 
-    out
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Dev layouts
+    push_sidecars(&mut bins, &manifest.join("binaries"));
+    push_python_sources(&mut pys, &manifest.join(".."));
+    push_python_sources(
+        &mut pys,
+        &manifest.join("..").join("..").join("Kodama"),
+    );
+
+    bins.extend(pys);
+    bins
 }
 
-fn python_cmds(server_py: &std::path::Path) -> Vec<Command> {
+fn python_cmds(server_py: &Path) -> Vec<Command> {
     let mut cmds = Vec::new();
     if let Some(dir) = server_py.parent() {
         #[cfg(windows)]
@@ -110,19 +116,30 @@ fn python_cmds(server_py: &std::path::Path) -> Vec<Command> {
 }
 
 /// Start the local API if nothing is listening on 9847.
-pub fn ensure_server(state: &ServerProcess, resource_dir: Option<PathBuf>) {
+/// Returns Ok(true) when the port is ready, Ok(false) when already running,
+/// or Err with a user-facing reason.
+pub fn ensure_server(state: &ServerProcess, resource_dir: Option<PathBuf>) -> Result<bool, String> {
     if port_open() {
         log::info!("YTMD API already running on :9847");
-        return;
+        return Ok(false);
     }
 
     let candidates = server_candidates(resource_dir.as_deref());
-    let target = candidates.iter().find(|p| p.exists()).map(|p| {
-        p.canonicalize().unwrap_or_else(|_| p.clone())
+    let existing: Vec<_> = candidates.iter().filter(|p| p.exists()).cloned().collect();
+    log::info!(
+        "Backend candidates (existing): {:?}",
+        existing.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+    );
+
+    let target = existing.first().cloned().map(|p| {
+        p.canonicalize().unwrap_or(p)
     });
     let Some(path) = target else {
-        log::error!("YTMD backend not found. Looked for: {candidates:?}");
-        return;
+        let msg = format!(
+            "Catalog backend not found. Looked for ytmd-backend next to the app (resources/) and python-backend/server.py."
+        );
+        log::error!("{msg} candidates={candidates:?}");
+        return Err(msg);
     };
 
     log::info!("Starting YTMD backend: {}", path.display());
@@ -166,32 +183,39 @@ pub fn ensure_server(state: &ServerProcess, resource_dir: Option<PathBuf>) {
         match spawned {
             Some(c) => c,
             None => {
-                log::error!("Failed to start backend with python: {:?}", last_err);
-                return;
+                let msg = format!(
+                    "Failed to start Python backend ({:?}). Install Python 3 or use a release build with ytmd-backend.exe.",
+                    last_err
+                );
+                log::error!("{msg}");
+                return Err(msg);
             }
         }
     } else {
         match spawn_one(Command::new(&path)) {
             Ok(c) => c,
             Err(e) => {
-                log::error!("Failed to start backend: {e}");
-                return;
+                let msg = format!("Failed to start backend {}: {e}", path.display());
+                log::error!("{msg}");
+                return Err(msg);
             }
         }
     };
 
     *state.0.lock().unwrap() = Some(child);
-    for _ in 0..80 {
+    for _ in 0..120 {
         if port_open() {
             log::info!("YTMD API ready on :9847 (log: {})", log_path.display());
-            return;
+            return Ok(true);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    log::warn!(
-        "YTMD API spawn timed out waiting for :9847 — see {}",
+    let msg = format!(
+        "Backend started but :9847 never came up — see {}",
         log_path.display()
     );
+    log::warn!("{msg}");
+    Err(msg)
 }
 
 pub fn stop_server(state: &ServerProcess) {

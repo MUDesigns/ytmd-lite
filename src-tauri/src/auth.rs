@@ -4,8 +4,16 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl};
 
+use crate::server::{self, ServerProcess};
+
 const PROFILE: &str = "default";
 const API: &str = "http://127.0.0.1:9847";
+
+fn ensure_api(app: &AppHandle) -> Result<(), String> {
+    let sp = app.state::<ServerProcess>();
+    let resource_dir = app.path().resource_dir().ok();
+    server::ensure_server(&sp, resource_dir).map(|_| ())
+}
 
 #[cfg(target_os = "macos")]
 const LOGIN_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15";
@@ -71,6 +79,9 @@ fn auth_data_dir(profile: &str) -> PathBuf {
 
 #[tauri::command]
 pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
+    // Cookie login posts to the local catalog API — make sure it's up.
+    ensure_api(&app)?;
+
     if let Some(w) = app.get_webview_window("login") {
         let _ = w.destroy();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

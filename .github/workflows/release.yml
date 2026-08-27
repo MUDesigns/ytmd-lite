@@ -110,6 +110,9 @@ jobs:
 
             Custom YouTube Music desktop client (Tauri 2).
 
+            ### Critical fix (v0.2.1)
+            - Release builds now correctly start the bundled `ytmd-backend` sidecar (sign-in and catalog API on :9847).
+
             Auto-update is enabled for signed installs via `latest.json` on this release.
           releaseDraft: false
           prerelease: false

@@ -180,7 +180,7 @@ function playableItems(items: MusicItem[]): QueueItem[] {
 function errMsg(e: unknown): string {
   if (e instanceof Error) {
     if (/failed to fetch|networkerror|load failed/i.test(e.message)) {
-      return "Catalog API unreachable on :9847 — restart the app or run Kodama’s python backend";
+      return "Catalog API unreachable on :9847 — restart the app (ytmd-backend should start automatically)";
     }
     return e.message || e.name;
   }

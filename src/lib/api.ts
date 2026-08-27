@@ -30,7 +30,7 @@ async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     const msg = e instanceof Error ? e.message : String(e);
     if (/failed to fetch|networkerror|load failed/i.test(msg)) {
       throw new Error(
-        "Catalog API unreachable on :9847 — restart the app or run: python Kodama/python-backend/server.py",
+        "Catalog API unreachable on :9847 — restart the app (it should start ytmd-backend automatically)",
       );
     }
     throw e instanceof Error ? e : new Error(msg);

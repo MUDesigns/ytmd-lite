@@ -112,7 +112,14 @@ pub fn run() {
             {
                 let sp = app.state::<ServerProcess>();
                 let resource_dir = app.path().resource_dir().ok();
-                server::ensure_server(&sp, resource_dir);
+                match server::ensure_server(&sp, resource_dir) {
+                    Ok(started) => {
+                        log::info!("Catalog backend ready (spawned={started})");
+                    }
+                    Err(e) => {
+                        log::error!("Catalog backend failed to start: {e}");
+                    }
+                }
             }
 
             ytm::create_main_window(
