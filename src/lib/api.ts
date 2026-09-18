@@ -221,15 +221,18 @@ function mapTrack(t: Record<string, unknown>): MusicItem {
 }
 
 export async function validateAuth(): Promise<{
-  valid: boolean;
+  valid: boolean | null;
   profile?: string;
   type?: string;
   reason?: string;
 }> {
   try {
-    return await api("/auth/validate");
+    const result = await api<{ valid: boolean; profile?: string; type?: string; reason?: string }>("/auth/validate");
+    if (typeof result?.valid !== "boolean") throw new Error("Invalid auth response");
+    return result;
   } catch {
-    return { valid: false, reason: "api_unreachable" };
+    // A failed check tells us nothing about the saved Google session.
+    return { valid: null, reason: "api_unreachable" };
   }
 }
 

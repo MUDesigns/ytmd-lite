@@ -8,7 +8,7 @@ const source = await readFile(new URL("../src/lib/api.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { loadLibrary, mapItem, browseDetail, search, searchLibrary } = await import(
+const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
 
@@ -114,4 +114,26 @@ test("An unrelated album named Liked Songs still opens as an album", async (t) =
 test("Liked Songs load errors reach the UI instead of becoming an empty collection", async (t) => {
   mockApi(t, { "/playlist/LM": { error: "Please sign in again" } });
   await assert.rejects(browseDetail({ browseId: "LM" }), /Please sign in again/);
+});
+
+test("Offline auth checks report an unknown session, not a logout", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => { throw new TypeError("Failed to fetch"); });
+  assert.equal((await validateAuth()).valid, null);
+});
+
+test("Backend errors and malformed auth responses do not report a logout", async (t) => {
+  for (const body of [{ error: "Temporarily unavailable" }, {}]) {
+    mockApi(t, { "/auth/validate": body });
+    assert.equal((await validateAuth()).valid, null);
+  }
+});
+
+test("Auth checks preserve confirmed sign-in and sign-out responses", async (t) => {
+  for (const body of [
+    { valid: true, profile: "default", type: "google" },
+    { valid: false, reason: "no_profile" },
+  ]) {
+    mockApi(t, { "/auth/validate": body });
+    assert.deepEqual(await validateAuth(), body);
+  }
 });
