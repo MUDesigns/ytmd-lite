@@ -4,6 +4,7 @@
   "description": "Lightweight YouTube Music Desktop client (Tauri 2) with Last.fm",
   "type": "module",
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",

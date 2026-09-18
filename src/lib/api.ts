@@ -147,11 +147,14 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
   const typeRaw = String(raw.type || "").toLowerCase();
   const browseId = raw.browseId ? String(raw.browseId) : undefined;
   let playlistId = raw.playlistId ? String(raw.playlistId) : undefined;
+  if (playlistId?.startsWith("VL")) playlistId = playlistId.slice(2);
   if (!playlistId && browseId?.startsWith("VL")) playlistId = browseId.slice(2);
+  if (!playlistId && browseId === "LM") playlistId = "LM";
   const videoId = raw.videoId ? String(raw.videoId) : undefined;
 
   let type: MusicItem["type"] = "song";
-  if (typeRaw === "album" || typeRaw === "single" || typeRaw === "ep") type = "album";
+  if (playlistId === "LM") type = "playlist";
+  else if (typeRaw === "album" || typeRaw === "single" || typeRaw === "ep") type = "album";
   else if (typeRaw === "artist") type = "artist";
   else if (typeRaw === "playlist" || typeRaw === "podcast") type = "playlist";
   else if (typeRaw === "mood") type = "mood";
@@ -281,6 +284,11 @@ export async function loadLibrary(): Promise<BrowseResult> {
   const plItems = (playlists.playlists || []).map((p) =>
     mapItem({ ...p, type: "playlist", title: p.title }),
   );
+  // Liked Songs has its own API and may be absent from library playlists.
+  // Load its tracks only when opened, using the backend's special LM route.
+  if (!plItems.some((p) => p.playlistId === "LM")) {
+    plItems.unshift(mapItem({ type: "playlist", playlistId: "LM", title: "Liked Songs" }));
+  }
   if (plItems.length) {
     shelves.push({
       type: "shelf",
@@ -466,10 +474,11 @@ export async function browseDetail(opts: {
     return { title: opts.title || "Mood", shelves: [], items: list.map(mapItem) };
   }
 
-  if (opts.playlistId || opts.browseId?.startsWith("VL")) {
-    const pid =
+  if (opts.playlistId || opts.browseId?.startsWith("VL") || opts.browseId === "LM") {
+    const rawPid =
       opts.playlistId ||
       (opts.browseId!.startsWith("VL") ? opts.browseId!.slice(2) : opts.browseId!);
+    const pid = rawPid.startsWith("VL") ? rawPid.slice(2) : rawPid;
     // Radio / auto-mix ids (Supermix, Archive Mix, artist radio, …) are infinite
     // watch playlists — get_playlist hangs; use /radio (get_watch_playlist) instead.
     const isRadioMix = pid.startsWith("RD");
