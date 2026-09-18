@@ -2,6 +2,8 @@ name: release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -103,18 +105,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', '0.1.0') }}
-          releaseName: YTMD Lite ${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.0' }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.run_number) }}
+          releaseName: YTMD Lite ${{ github.ref_type == 'tag' && github.ref_name || format('main build {0}', github.run_number) }}
+          releaseCommitish: ${{ github.sha }}
           releaseBody: |
             ## YTMD Lite
 
             Custom YouTube Music desktop client (Tauri 2).
 
-            ### Critical fix (v0.2.1)
-            - Release builds now correctly start the bundled `ytmd-backend` sidecar (sign-in and catalog API on :9847).
+            Windows installers include the Python API backend.
+            Built from commit ${{ github.sha }}.
 
-            Auto-update is enabled for signed installs via `latest.json` on this release.
+            Main builds are prereleases; version-tag releases are available through the stable auto-updater.
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ github.ref_type != 'tag' }}
           args: ${{ matrix.args }}
           updaterJsonPreferNsis: true
