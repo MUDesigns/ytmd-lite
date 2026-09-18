@@ -73,6 +73,10 @@
   let searchQuery = $state("");
   let searchData = $state<BrowseResult | null>(null);
   let searchBusy = $state(false);
+  let searchError = $state<string | null>(null);
+  let searchRequest = 0;
+  let browseRequest = 0;
+  let searchFrom: Panel = "home";
   let searchSuggestionsList = $state<string[]>([]);
   let searchFilter = $state<SearchFilter>("all");
   let recentSearches = $state<string[]>(typeof localStorage !== "undefined" ? loadRecentSearches() : []);
@@ -99,13 +103,13 @@
     if (panel === "detail" && (detail?.title || detailData?.title)) {
       return `${detailFrom}/${detail?.title || detailData?.title || "detail"}`;
     }
-    if (searchQuery.trim()) {
+    if (panel === "search" && searchQuery.trim()) {
       return `search/${searchQuery.trim()}`;
     }
     return panel;
   });
 
-  const isSearching = $derived(!!searchQuery.trim());
+  const isSearching = $derived(panel === "search");
   const detailCover = $derived(
     thumb({ thumbnails: detailData?.thumbnails }) ||
       thumb(detailData?.items?.[0]) ||
@@ -285,7 +289,11 @@
       }
     })();
 
-    return () => unsubs.forEach((u) => u());
+    return () => {
+      cancelSearchRequest();
+      ++browseRequest;
+      unsubs.forEach((u) => u());
+    };
   });
 
   async function probeAuth() {
@@ -307,34 +315,47 @@
   }
 
   async function refreshPanel(target: Panel = panel) {
+    const request = ++browseRequest;
+    const targetDetail = detail;
     loading = true;
     loadError = null;
     try {
-      if (target === "home") homeData = await loadHome();
-      else if (target === "explore") exploreData = await loadExplore();
-      else if (target === "library") libraryData = await loadLibrary();
-      else if (target === "detail" && detail) {
-        // Ensure like hearts match the signed-in account before painting tracks
-        const [, data] = await Promise.all([refreshLiked(), browseDetail(detail)]);
-        detailData = data;
+      let data: BrowseResult | null = null;
+      if (target === "home") data = await loadHome();
+      else if (target === "explore") data = await loadExplore();
+      else if (target === "library") data = await loadLibrary();
+      else if (target === "detail" && targetDetail) {
+        [, data] = await Promise.all([refreshLiked(), browseDetail(targetDetail)]);
       }
+      if (request !== browseRequest || panel !== target) return;
+      if (target === "home") homeData = data;
+      else if (target === "explore") exploreData = data;
+      else if (target === "library") libraryData = data;
+      else if (target === "detail") detailData = data;
       if (!engine.signedIn) {
         const auth = await validateAuth();
         if (auth.valid) setSignedIn(true, auth.profile ?? null);
       }
     } catch (e) {
+      if (request !== browseRequest || panel !== target) return;
       const msg = String(e);
       loadError = msg;
       if (/no_profile|valid|auth|cookie|401|403/i.test(msg) || !engine.signedIn) {
         statusMsg = "Sign in required";
       }
     } finally {
-      loading = false;
+      if (request === browseRequest) loading = false;
     }
   }
 
   async function setPanel(next: Panel) {
+    cancelSearchRequest();
+    ++browseRequest;
+    loading = false;
+    loadError = null;
+    ctx = { ...ctx, open: false };
     panel = next;
+    if (next === "search" && searchQuery.trim() && !searchData) void runSearch();
     if (next !== "detail") detailFrom = next;
     statusMsg = next === "settings" ? "Settings" : `Opened ${next}`;
     if (next === "settings") {
@@ -461,7 +482,7 @@
     try {
       statusMsg = `Buffering ${item.title}…`;
       if (item.videoId && item.type === "song") {
-        if (detailData?.items?.length) {
+        if (panel === "detail" && detailData?.items?.length) {
           const idx = detailData.items.findIndex((t) => t.videoId === item.videoId);
           if (idx >= 0) {
             await playerCtl.playItems(detailData.items, idx);
@@ -637,65 +658,94 @@
     { id: "library", label: "Library" },
   ];
 
-  function onSearchInput() {
+  function cancelSearchRequest() {
     if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = null;
+    ++searchRequest;
+    searchBusy = false;
+  }
+
+  function enterSearch() {
+    if (panel !== "search") {
+      searchFrom = panel === "detail" ? detailFrom : panel;
+      if (searchFrom === "search") searchFrom = "home";
+      ++browseRequest;
+      loading = false;
+      loadError = null;
+      panel = "search";
+    }
+  }
+
+  function onSearchInput() {
+    cancelSearchRequest();
+    searchError = null;
+    searchData = null;
+    searchSuggestionsList = [];
     const q = searchQuery.trim();
     if (!q) {
-      searchSuggestionsList = [];
-      searchData = null;
+      clearSearch();
       return;
     }
-    searchTimer = setTimeout(() => {
-      void runLiveSearch(q);
-    }, 320);
+    enterSearch();
+    searchBusy = true;
+    searchTimer = setTimeout(() => void runLiveSearch(q), 320);
   }
 
   async function runLiveSearch(q: string, filter: SearchFilter = searchFilter) {
+    cancelSearchRequest();
+    const request = searchRequest;
     searchBusy = true;
-    loadError = null;
+    searchError = null;
     try {
-      const wantSuggestions = filter !== "library";
       const [results, suggestions] = await Promise.all([
         search(q, filter),
-        wantSuggestions
+        filter !== "library"
           ? searchSuggestions(q).catch(() => ({ suggestions: [] as string[] }))
           : Promise.resolve({ suggestions: [] as string[] }),
       ]);
-      if (searchQuery.trim() !== q || searchFilter !== filter) return; // stale
+      if (request !== searchRequest || searchQuery.trim() !== q || searchFilter !== filter) return;
       searchData = results;
       searchSuggestionsList = suggestions.suggestions ?? [];
     } catch (e) {
-      loadError = String(e);
+      if (request === searchRequest) searchError = String(e);
     } finally {
-      searchBusy = false;
+      if (request === searchRequest) searchBusy = false;
     }
   }
 
   async function runSearch() {
     const q = searchQuery.trim();
     if (!q) return;
+    enterSearch();
     recentSearches = pushRecentSearch(q) ?? loadRecentSearches();
     await runLiveSearch(q);
   }
 
   function applySearchTerm(term: string) {
     searchQuery = term;
-    recentSearches = pushRecentSearch(term) ?? loadRecentSearches();
-    void runLiveSearch(term);
+    searchData = null;
+    searchSuggestionsList = [];
+    void runSearch();
   }
 
   function setSearchFilter(next: SearchFilter) {
     if (searchFilter === next) return;
     searchFilter = next;
+    searchData = null;
+    searchSuggestionsList = [];
     const q = searchQuery.trim();
     if (q) void runLiveSearch(q, next);
   }
 
   function clearSearch() {
+    cancelSearchRequest();
     searchQuery = "";
     searchData = null;
+    searchError = null;
     searchSuggestionsList = [];
-    if (searchTimer) clearTimeout(searchTimer);
+    searchFilter = "all";
+    if (panel === "detail" && detailFrom === "search") detailFrom = searchFrom;
+    if (panel === "search") void setPanel(searchFrom);
   }
 
   async function minimize() {
@@ -914,6 +964,8 @@
     >
       <span class="material-symbols-outlined">search</span>
       <input
+        aria-label="Search music"
+        onkeydown={(e) => { if (e.key === "Escape") clearSearch(); }}
         bind:value={searchQuery}
         placeholder="search — songs, albums, artists…"
         oninput={onSearchInput}
@@ -926,20 +978,22 @@
       <button class="btn primary" type="submit" disabled={searchBusy}>Search</button>
     </form>
 
-    <div class="search-filters" role="tablist" aria-label="Search filter">
-      {#each SEARCH_FILTERS as f (f.id)}
-        <button
-          type="button"
-          class="filter-chip"
-          class:active={searchFilter === f.id}
-          role="tab"
-          aria-selected={searchFilter === f.id}
-          onclick={() => setSearchFilter(f.id)}
-        >
-          {f.label}
-        </button>
-      {/each}
-    </div>
+    {#if isSearching}
+      <div class="search-filters" role="tablist" aria-label="Search filter">
+        {#each SEARCH_FILTERS as f (f.id)}
+          <button
+            type="button"
+            class="filter-chip"
+            class:active={searchFilter === f.id}
+            role="tab"
+            aria-selected={searchFilter === f.id}
+            onclick={() => setSearchFilter(f.id)}
+          >
+            {f.label}
+          </button>
+        {/each}
+      </div>
+    {/if}
 
     {#if !isSearching && recentSearches.length && (panel === "home" || panel === "explore" || panel === "library")}
       <div class="chips-block">
@@ -952,7 +1006,7 @@
       </div>
     {/if}
 
-    {#if isSearching && panel !== "detail" && searchSuggestionsList.length}
+    {#if isSearching && searchSuggestionsList.length}
       <div class="chips-block">
         <div class="chips-label">Suggestions</div>
         <div class="chips">
@@ -1125,15 +1179,15 @@
           </button>
         </div>
 
-        {#if loadError}
-          <div class="callout error">{loadError}</div>
+        {#if searchError}
+          <div class="callout error">{searchError}</div>
           <button class="btn" onclick={() => (engine.signedIn ? void runSearch() : openLogin())}>
             {engine.signedIn ? "Retry" : "Sign in"}
           </button>
         {/if}
 
         <div class="browse-body" class:dimmed={searchBusy}>
-          {#if !searchBusy && !shelvesOf(searchData).length}
+          {#if !searchBusy && !searchError && searchData && !shelvesOf(searchData).length}
             <p class="muted">No results for “{searchQuery.trim()}”.</p>
           {/if}
           {#each shelvesOf(searchData) as shelf (shelf.id + shelf.title)}

@@ -1,4 +1,5 @@
 export type Panel =
+  | "search"
   | "home"
   | "explore"
   | "library"

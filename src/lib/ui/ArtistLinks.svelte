@@ -11,7 +11,7 @@
     onopen?: (artist: ArtistLink) => void;
   } = $props();
 
-  const links = $derived(
+  const links: ArtistLink[] = $derived(
     artists?.length
       ? artists
       : fallback

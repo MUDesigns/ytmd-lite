@@ -46,6 +46,16 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      - name: Validate frontend
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check
+
+      - name: Set release version
+        id: version
+        run: node scripts/release-version.mjs
+
       - name: Write Last.fm secrets
         shell: bash
         env:
@@ -105,8 +115,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.run_number) }}
-          releaseName: YTMD Lite ${{ github.ref_type == 'tag' && github.ref_name || format('main build {0}', github.run_number) }}
+          tagName: ${{ steps.version.outputs.tag }}
+          releaseName: YTMD Lite ${{ steps.version.outputs.tag }}
           releaseCommitish: ${{ github.sha }}
           releaseBody: |
             ## YTMD Lite
@@ -116,8 +126,22 @@ jobs:
             Windows installers include the Python API backend.
             Built from commit ${{ github.sha }}.
 
-            Main builds are prereleases; version-tag releases are available through the stable auto-updater.
-          releaseDraft: false
-          prerelease: ${{ github.ref_type != 'tag' }}
+            Signed installers and latest.json are available through the auto-updater.
+          releaseDraft: true
+          prerelease: false
           args: ${{ matrix.args }}
           updaterJsonPreferNsis: true
+
+      - name: Publish complete release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # A slower older build must not replace a newer updater release.
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq .tag_name
+          if ($LASTEXITCODE -ne 0) { throw "Could not check the current stable release" }
+          $makeLatest = ([version]$env:RELEASE_VERSION -gt [version]($latest -replace '^v', '')).ToString().ToLowerInvariant()
+          gh release edit $env:RELEASE_TAG --draft=false --prerelease=false "--latest=$makeLatest"
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish the release" }

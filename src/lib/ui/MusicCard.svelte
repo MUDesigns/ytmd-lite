@@ -42,7 +42,11 @@
   role="button"
   tabindex="0"
   onkeydown={(e) => {
-    if (e.key === "Enter") open();
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      open();
+    }
   }}
   onclick={open}
   oncontextmenu={(e) => {

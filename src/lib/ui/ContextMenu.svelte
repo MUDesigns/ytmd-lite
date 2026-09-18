@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   export type MenuAction = {
     id: string;
     label: string;
@@ -28,8 +29,26 @@
 
   $effect(() => {
     if (!open) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    void tick().then(() => {
+      if (open) menuEl?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    });
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onclose?.();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onclose?.();
+        previousFocus?.focus();
+      } else if (e.key === "Tab") {
+        onclose?.();
+      } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+        const buttons = Array.from(menuEl?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+        if (!buttons.length) return;
+        e.preventDefault();
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1
+          : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+      }
     };
     const onDown = (e: MouseEvent) => {
       if (menuEl && !menuEl.contains(e.target as Node)) onclose?.();
@@ -57,6 +76,7 @@
     class="ctx"
     style={style}
     role="menu"
+    tabindex="-1"
     bind:this={menuEl}
     oncontextmenu={(e) => e.preventDefault()}
   >
@@ -110,7 +130,8 @@
     font: inherit;
     font-size: 11px;
   }
-  .item:hover:not(:disabled) {
+  .item:hover:not(:disabled),
+  .item:focus-visible {
     background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
     color: var(--md-sys-color-primary);
   }

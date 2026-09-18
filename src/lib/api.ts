@@ -64,7 +64,7 @@ export function parseArtistLinks(raw: Record<string, unknown>): ArtistLink[] {
   const fromLinks = raw.artistLinks;
   if (Array.isArray(fromLinks) && fromLinks.length) {
     return fromLinks
-      .map((a) => {
+      .map((a): ArtistLink | null => {
         if (!a || typeof a !== "object") return null;
         const o = a as { name?: string; browseId?: string; id?: string };
         const name = String(o.name || "").trim();
@@ -76,14 +76,14 @@ export function parseArtistLinks(raw: Record<string, unknown>): ArtistLink[] {
   }
 
   const primary =
-    (raw.artistBrowseId && String(raw.artistBrowseId)) ||
+    (raw.artistBrowseId ? String(raw.artistBrowseId) : undefined) ||
     (typeof raw.browseId === "string" && String(raw.browseId).startsWith("UC")
       ? String(raw.browseId)
       : undefined);
 
   if (Array.isArray(raw.artists) && raw.artists.some((a) => a && typeof a === "object")) {
     return raw.artists
-      .map((a, i) => {
+      .map((a, i): ArtistLink | null => {
         if (!a || typeof a !== "object") return null;
         const o = a as { name?: string; id?: string; browseId?: string };
         const name = String(o.name || "").trim();
@@ -179,7 +179,7 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
 
   const artistLinks = parseArtistLinks(raw);
   const artistBrowseId =
-    (raw.artistBrowseId && String(raw.artistBrowseId)) ||
+    (raw.artistBrowseId ? String(raw.artistBrowseId) : undefined) ||
     artistLinks.find((a) => a.browseId)?.browseId ||
     undefined;
 
