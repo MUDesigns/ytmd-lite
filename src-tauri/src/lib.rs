@@ -133,11 +133,18 @@ pub fn run() {
                 e
             })?;
 
-            // Try restoring session-keeper if cookies already exist
+            // Keep the API's cookies in sync with the browser, including after sleep.
             let keeper = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let _ = auth::ensure_session_keeper(keeper).await;
+                loop {
+                    if auth::ensure_session_keeper(keeper.clone()).await.is_ok() {
+                        if let Err(e) = auth::rotate_session_cookies(keeper.clone()).await {
+                            log::debug!("Session cookie refresh deferred: {e}");
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                }
             });
 
             let player_for_listen = player.clone();
