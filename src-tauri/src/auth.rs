@@ -33,6 +33,8 @@ const LOGIN_INIT_JS: &str = r#"
     } catch (e) {}
     return '';
   }
+  // A previous confirmation must not silently confirm a new login attempt.
+  setCookie('YTMD_DONE', '');
   setInterval(function () { setCookie('YTMD_DSID', readDsid()); }, 1000);
   function injectBar() {
     if (!document.body || document.getElementById('ytmd-confirm-bar')) return;
@@ -61,7 +63,7 @@ const LOGIN_INIT_JS: &str = r#"
 })();
 "#;
 
-fn auth_data_dir(profile: &str) -> PathBuf {
+fn auth_data_dir(app: &AppHandle, profile: &str) -> Result<PathBuf, String> {
     let safe: String = profile
         .chars()
         .map(|c| {
@@ -72,9 +74,27 @@ fn auth_data_dir(profile: &str) -> PathBuf {
             }
         })
         .collect();
-    std::env::temp_dir()
+    let legacy = std::env::temp_dir()
         .join("ytmd-lite-auth-webview")
-        .join(safe)
+        .join(&safe);
+    let root = app.path().app_local_data_dir().map_err(|e| e.to_string())?
+        .join("auth-webview");
+    let dir = root.join(safe);
+    migrate_auth_data_dir(dir, legacy)
+}
+
+fn migrate_auth_data_dir(dir: PathBuf, legacy: PathBuf) -> Result<PathBuf, String> {
+    if !dir.exists() && legacy.exists() {
+        let parent = dir.parent().ok_or("auth directory has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        // Preserve existing sessions when upgrading from the temporary directory.
+        // If it is still locked by another instance, retry migration next launch.
+        if let Err(e) = std::fs::rename(&legacy, &dir) {
+            log::warn!("Auth storage migration deferred: {e}");
+            return Ok(legacy);
+        }
+    }
+    Ok(dir)
 }
 
 #[tauri::command]
@@ -90,8 +110,7 @@ pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
         let _ = w.destroy();
     }
 
-    let login_data_dir = auth_data_dir(PROFILE);
-    let _ = std::fs::remove_dir_all(&login_data_dir);
+    let login_data_dir = auth_data_dir(&app, PROFILE)?;
 
     let labels = serde_json::json!({
         "confirm": "Use this account",
@@ -231,7 +250,11 @@ pub async fn ensure_session_keeper(app: AppHandle) -> Result<(), String> {
     if app.get_webview_window("session-keeper").is_some() {
         return Ok(());
     }
-    let dir = auth_data_dir(PROFILE);
+    // Do not navigate a second webview through an account switch in progress.
+    if app.get_webview_window("login").is_some() {
+        return Ok(());
+    }
+    let dir = auth_data_dir(&app, PROFILE)?;
     if !dir.exists() {
         return Err("no auth data — sign in first".into());
     }
@@ -287,8 +310,8 @@ pub async fn rotate_session_cookies(app: AppHandle) -> Result<(), String> {
         let _ = tx.send(pairs);
     });
     let found = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default();
-    if found.is_empty() {
-        return Err("no cookies from session-keeper".into());
+    if !found.iter().any(|(name, value)| name == "SAPISID" && !value.is_empty()) {
+        return Err("no auth cookies from session-keeper".into());
     }
     let cookie_str = found
         .iter()
@@ -300,6 +323,7 @@ pub async fn rotate_session_cookies(app: AppHandle) -> Result<(), String> {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{API}/auth/refresh-cookies"))
+        .timeout(std::time::Duration::from_secs(20))
         .json(&serde_json::json!({
             "cookie": cookie_str,
             "profile_name": PROFILE,
@@ -339,7 +363,7 @@ pub async fn google_logout(app: AppHandle) -> Result<(), String> {
         });
     }
 
-    let dir = auth_data_dir(PROFILE);
+    let dir = auth_data_dir(&app, PROFILE)?;
     let _ = std::fs::remove_dir_all(&dir);
     let _ = app.emit("auth-signed-out", ());
     Ok(())
@@ -362,4 +386,38 @@ pub async fn api_status() -> Result<serde_json::Value, String> {
         return Ok(serde_json::json!({ "ok": false, "body": body }));
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_existing_session_without_overwriting_a_newer_one() {
+        let root = std::env::temp_dir().join(format!(
+            "ytmd-auth-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let legacy = root.join("legacy");
+        let durable = root.join("app-data").join("default");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Cookies"), "existing session").unwrap();
+        assert_eq!(migrate_auth_data_dir(durable.clone(), legacy.clone()).unwrap(), durable);
+        assert_eq!(std::fs::read_to_string(durable.join("Cookies")).unwrap(), "existing session");
+        assert!(!legacy.exists());
+
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Cookies"), "older session").unwrap();
+        migrate_auth_data_dir(durable.clone(), legacy.clone()).unwrap();
+        assert_eq!(std::fs::read_to_string(durable.join("Cookies")).unwrap(), "existing session");
+        // Remove only the known files/directories this test created.
+        std::fs::remove_file(durable.join("Cookies")).unwrap();
+        std::fs::remove_file(legacy.join("Cookies")).unwrap();
+        std::fs::remove_dir(&durable).unwrap();
+        std::fs::remove_dir(durable.parent().unwrap()).unwrap();
+        std::fs::remove_dir(&legacy).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+        assert_eq!(migrate_auth_data_dir(durable.clone(), legacy).unwrap(), durable);
+        assert!(!root.exists(), "Signed-out users must not get a new keeper profile");
+    }
 }

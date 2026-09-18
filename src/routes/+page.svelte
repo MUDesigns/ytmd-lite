@@ -249,7 +249,8 @@
         }),
       );
       unsubs.push(
-        await listen<string>("login-complete", async () => {
+        await listen<string>("login-complete", async (e) => {
+          setSignedIn(true, e.payload);
           await probeAuth();
           statusMsg = "Signed in";
           void refreshLiked();
@@ -289,6 +290,11 @@
 
   async function probeAuth() {
     const auth = await validateAuth();
+    if (auth.valid === null) {
+      engine = { ...engine, ready: false };
+      statusMsg = "Catalog API unavailable — retry when it is back online";
+      return;
+    }
     setSignedIn(!!auth.valid, auth.profile ?? null);
     if (!auth.valid) {
       statusMsg =

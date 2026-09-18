@@ -260,8 +260,8 @@ fn connect_client() -> Result<DiscordIpcClient, String> {
         .map_err(|e| {
             format!(
                 "Cannot reach Discord IPC ({e}). Is Discord open? Enable Activity Privacy → \
-                 “Share your activity with others”. YTMD Lite requests Administrator so its \
-                 integrity level can match Discord for named-pipe access — accept the UAC prompt."
+                 “Share your activity with others”. Run Discord and YTMD Lite as the same \
+                 Windows user without “Run as administrator”."
             )
         })?;
     Ok(client)

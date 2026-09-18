@@ -14,7 +14,7 @@ src-tauri/binaries
 src-tauri/resources/*.exe
 python-backend/.venv
 python-backend/build_tmp
-python-backend/__pycache__
+__pycache__/
 python-backend/*_cache
 python-backend/profiles
 python-backend/ytdlp
