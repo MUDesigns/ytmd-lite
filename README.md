@@ -54,6 +54,9 @@ cp lastfm.secrets.json.example src-tauri/lastfm.secrets.json
 npm run tauri dev
 ```
 
+On Windows, run development from a normal terminal; administrator access is not required.
+For Discord Rich Presence, run Discord as the same Windows user without **Run as administrator**.
+
 ## Build
 
 ```sh

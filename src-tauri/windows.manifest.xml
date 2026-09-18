@@ -14,11 +14,11 @@
     </dependentAssembly>
   </dependency>
 
-  <!-- Elevate by default so Discord IPC named pipes can connect reliably. -->
+  <!-- Run as the current user; Discord should run as the same user without elevation. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
