@@ -778,6 +778,31 @@ def clean_headers_for_storage(headers):
             h["authorization"] = f"SAPISIDHASH {ts}_{sha}"
     return h
 
+
+def _write_auth_json(path, data):
+    """Replace a credentials file atomically so interruption cannot truncate it."""
+    import tempfile
+    fd, pending = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(pending, path)
+    finally:
+        if os.path.exists(pending):
+            os.remove(pending)
+
+
+_auth_write_lock = threading.RLock()
+
+
+def _serialize_auth_write(handler):
+    from functools import wraps
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        with _auth_write_lock:
+            return handler(*args, **kwargs)
+    return wrapped
+
 def _brand_user_id(name):
     """The brand-account user id stored for a profile, or None. Passed to YTMusic as
     `user=` so requests act on behalf of a brand account (ytmusicapi's onBehalfOfUser).
@@ -849,7 +874,8 @@ def _refresh_ytm_psidts(force=False):
         now = time.time()
         if not force and (now - _psidts_last_refresh) < 240:
             return
-        base = getattr(_ytm, "base_headers", None)
+        session_profile, session_client = _current_profile, _ytm
+        base = getattr(session_client, "base_headers", None)
         if base is None:
             return
         cookie_header = base.get("cookie", "")
@@ -909,18 +935,23 @@ def _refresh_ytm_psidts(force=False):
         for cname, val in fresh.items():
             if cname not in seen:
                 parts.append(f"{cname}={val}")
-        base["cookie"] = "; ".join(parts)
-        # Persist the freshest cookies back to the profile so a backend restart keeps the
-        # live session instead of falling back to the (possibly stale) login-time cookies.
-        try:
-            p = profile_path(_current_profile)
-            with open(p) as f:
-                raw = json.load(f)
-            raw["cookie"] = base["cookie"]
-            with open(p, "w") as f:
-                json.dump(raw, f, indent=2)
-        except Exception:
-            pass
+        with _auth_write_lock:
+            # A browser refresh or account switch may have completed during the GETs.
+            # Never overwrite that newer session with this request's older cookies.
+            if (_current_profile != session_profile or _ytm is not session_client
+                    or base.get("cookie") != cookie_header):
+                return
+            base["cookie"] = "; ".join(parts)
+            # Persist the freshest cookies back to the profile so a backend restart keeps the
+            # live session instead of falling back to the (possibly stale) login-time cookies.
+            try:
+                p = profile_path(_current_profile)
+                with open(p) as f:
+                    raw = json.load(f)
+                raw["cookie"] = base["cookie"]
+                _write_auth_json(p, raw)
+            except Exception:
+                pass
         _psidts_last_refresh = now
         if authed is not None:
             _LAST_AUTHED = authed
@@ -934,6 +965,7 @@ def _psidts_refresher_loop():
         _refresh_ytm_psidts(force=True)
 
 @app.route("/auth/refresh-cookies", methods=["POST"])
+@_serialize_auth_write
 def refresh_cookies():
     """Receive a freshly rotated cookie set captured from the hidden session-keeper WebView.
     A real browser engine rotates the *SIDTS timestamp tokens that plain HTTP cannot, so this
@@ -943,8 +975,11 @@ def refresh_cookies():
     if _ytm is None or not _current_profile or is_local_profile(_current_profile):
         return jsonify({"error": "no_profile"}), 400
     data = request.json or {}
+    if data.get("profile_name") != _current_profile:
+        return jsonify({"error": "profile_changed"}), 409
     cookie_str = (data.get("cookie") or "").strip()
-    if "SAPISID" not in cookie_str:
+    cookies = dict(part.strip().split("=", 1) for part in cookie_str.split(";") if "=" in part)
+    if not cookies.get("SAPISID"):
         return jsonify({"error": "invalid"}), 400
     # The keeper WebView may still hold the login helper cookies (KODAMA_DSID/KODAMA_DONE,
     # max-age 1h) — never let them bleed into the persisted auth header.
@@ -955,16 +990,17 @@ def refresh_cookies():
     base = getattr(_ytm, "base_headers", None)
     if base is None:
         return jsonify({"error": "no_headers"}), 500
-    base["cookie"] = cookie_str
     try:
         p = profile_path(_current_profile)
         with open(p) as f:
             raw = json.load(f)
         raw["cookie"] = cookie_str
-        with open(p, "w") as f:
-            json.dump(raw, f, indent=2)
+        _write_auth_json(p, raw)
     except Exception:
-        pass
+        return jsonify({"error": "Could not save refreshed session"}), 500
+    base["cookie"] = cookie_str
+    # ytmusicapi caches this signing key separately from the Cookie header.
+    _ytm.sapisid = cookies["SAPISID"]
     _psidts_last_refresh = time.time()
     has_ts = "__Secure-1PSIDTS" in cookie_str or "__Secure-3PSIDTS" in cookie_str
     _logging.info(f"[cookies] WebView refresh applied (PSIDTS present: {has_ts})")
@@ -1458,6 +1494,7 @@ def setup_auth():
 
 
 @app.route("/auth/cookie-login", methods=["POST"])
+@_serialize_auth_write
 def cookie_login():
     """Empfängt Cookies direkt aus dem eingebetteten Browser-Fenster."""
     data = request.json or {}
@@ -1512,21 +1549,15 @@ def cookie_login():
     headers = clean_headers_for_storage(headers)
 
     path = profile_path(profile_name)
-    with open(path, "w") as f:
-        json.dump(headers, f, indent=2)
 
     # Try to initialize YTMusic — with the brand-account context if one was selected, so the
     # validation test actually exercises the chosen (brand) account, not the default one.
     _logging.info(f"[login] cookie-login profile={profile_name} brand_account={'yes id=' + delegated if delegated else 'no (default account)'}")
     try:
-        ytm_temp = YTMusic(path, user=delegated or None)
+        ytm_temp = YTMusic(headers, user=delegated or None)
         # Quick test
         ytm_temp.get_liked_songs(limit=1)
         global _ytm, _current_profile, _playlist_cache
-        _ytm = ytm_temp
-        _current_profile = profile_name
-        _playlist_cache.clear()
-
         # Save meta — merge with any existing meta so a re-login into a logged-out
         # profile keeps its data and drops the logged_out flag.
         meta_path_ = os.path.join(PROFILES_DIR, f"{profile_name}.meta.json")
@@ -1545,8 +1576,11 @@ def cookie_login():
             meta["brandUserId"] = delegated
         else:
             meta.pop("brandUserId", None)
-        with open(meta_path_, "w") as f:
-            json.dump(meta, f)
+        _write_auth_json(meta_path_, meta)
+        _write_auth_json(path, headers)
+        _ytm = ytm_temp
+        _current_profile = profile_name
+        _playlist_cache.clear()
 
         # Fetch real account name in background
         threading.Thread(target=fetch_account_info, args=(profile_name,), daemon=True).start()
@@ -1556,11 +1590,10 @@ def cookie_login():
         return jsonify({"ok": True, "profile": profile_name})
     except Exception as e:
         _logging.error(f"[login] cookie-login profile={profile_name} FAILED: {e}")
-        if os.path.exists(path):
-            os.remove(path)
         return jsonify({"error": f"Login fehlgeschlagen: {str(e)}"}), 500
 
 @app.route("/auth/logout", methods=["POST"])
+@_serialize_auth_write
 def logout():
     """Logs out the active Google profile: removes its auth cookies (the .json
     headers file) while keeping the profile's .meta.json and local DB, so the
