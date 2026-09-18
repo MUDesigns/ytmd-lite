@@ -68,6 +68,12 @@ npm run tauri build
 
 Signed updater artifacts require `TAURI_SIGNING_PRIVATE_KEY` (and optional password) in the environment. CI sets these from repository secrets.
 
+### Automated builds
+
+Every push to `main` builds signed Windows installers with the bundled Python backend and publishes a new [GitHub prerelease](https://github.com/MUDesigns/ytmd-lite/releases), tagged `main-<run number>`. Download the `.exe` or `.msi` installer from that build's assets.
+
+The [release workflow](https://github.com/MUDesigns/ytmd-lite/actions/workflows/release.yml) can also be started manually. Pushing a `v*` tag publishes a stable release used by the auto-updater; main prereleases do not replace the stable update channel. Main builds retain the app version in the source configuration.
+
 ## Auto-update
 
 Release builds query:
