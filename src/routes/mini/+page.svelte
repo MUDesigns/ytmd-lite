@@ -53,7 +53,7 @@
 <svelte:head><title>YTMD Lite — Mini player</title></svelte:head>
 <main class="mini-player">
   <div class="mini-titlebar" role="toolbar" tabindex="-1" aria-label="Mini player window" onmousedown={drag}>
-    <span class="mini-brand">ytmd-lite <span>/ mini</span></span>
+    <span class="mini-brand">~/music</span>
     <button title={pinned ? "Turn off always on top" : "Keep always on top"} aria-label="Always on top" aria-pressed={pinned} class:active={pinned} onclick={pin}><span class="material-symbols-outlined">push_pin</span></button>
     <button title="Return to full player" aria-label="Return to full player" onclick={restore}><span class="material-symbols-outlined">open_in_full</span></button>
     <button title="Close mini player" aria-label="Close mini player" onclick={restore}><span class="material-symbols-outlined">close</span></button>
@@ -64,37 +64,48 @@
   </div>
   <div class="mini-seek"><span>{time(progress)}</span><input aria-label="Seek" type="range" min="0" max={duration || 1} step="1" value={progress} disabled={!duration} oninput={(e) => { scrubbing = true; scrub = Number(e.currentTarget.value); }} onchange={(e) => { void command(`seek:${e.currentTarget.value}`); scrubbing = false; }} /><span>{time(duration)}</span></div>
   <div class="mini-controls">
-    <button aria-label="Previous track" title="Previous track" disabled={!player.videoDetails} onclick={() => command("previous")}><span class="material-symbols-outlined">skip_previous</span></button>
-    <button class="mini-play" aria-label={playing ? "Pause" : "Play"} title={playing ? "Pause" : "Play"} disabled={!player.videoDetails} onclick={() => command("playPause")}><span class="material-symbols-outlined">{playing ? "pause" : "play_arrow"}</span></button>
-    <button aria-label="Next track" title="Next track" disabled={!player.videoDetails} onclick={() => command("next")}><span class="material-symbols-outlined">skip_next</span></button>
-    <span class="volume-icon material-symbols-outlined" aria-hidden="true">volume_up</span><input aria-label="Volume" type="range" min="0" max="100" value={player.volume ?? 100} oninput={(e) => command(`volume:${e.currentTarget.value}`)} />
+    <span class="prompt" aria-hidden="true">$</span>
+    <button aria-label="Previous track" title="Previous track" disabled={!player.videoDetails} onclick={() => command("previous")}>|&lt;</button>
+    <button class="mini-play" aria-label={playing ? "Pause" : "Play"} title={playing ? "Pause" : "Play"} disabled={!player.videoDetails} onclick={() => command("playPause")}>{playing ? "pause" : "play"}</button>
+    <button aria-label="Next track" title="Next track" disabled={!player.videoDetails} onclick={() => command("next")}> &gt;|</button>
+  </div>
+  <div class="mini-volume">
+    <span class="volume-icon" aria-hidden="true">vol</span><input aria-label="Volume" type="range" min="0" max="100" value={player.volume ?? 100} oninput={(e) => command(`volume:${e.currentTarget.value}`)} /><span class="volume-value">{Math.round(player.volume ?? 100)}%</span>
   </div>
 </main>
 
 <style>
-  .mini-player { height: 100%; width: 100%; border: 1px solid var(--md-sys-color-outline); background: var(--md-sys-color-surface); display: flex; flex-direction: column; }
-  .mini-titlebar { display: flex; align-items: center; height: 30px; flex-shrink: 0; padding: 0 4px 0 12px; background: var(--md-sys-color-surface-container-lowest); border-bottom: var(--hairline); cursor: grab; }
+  .mini-player { height: 100%; width: 100%; border: 1px solid var(--md-sys-color-outline); background: var(--md-sys-color-surface-container-lowest); display: flex; flex-direction: column; font-family: "Cascadia Code", "Consolas", monospace; }
+  .mini-titlebar { display: flex; align-items: center; height: 28px; flex-shrink: 0; padding: 0 2px 0 8px; background: var(--md-sys-color-surface-container-lowest); border-bottom: var(--hairline); cursor: grab; }
   .mini-brand { flex: 1; color: var(--md-sys-color-primary); font-size: 11px; }
-  .mini-brand > span { color: var(--md-sys-color-on-surface-variant); }
-  button { display: grid; place-items: center; padding: 0; width: 30px; height: 28px; }
+  button { display: grid; place-items: center; padding: 0; width: 30px; height: 28px; font: inherit; border-radius: 0; }
+  button:focus-visible, input:focus-visible { outline: 1px solid var(--md-sys-color-primary); outline-offset: 2px; }
   button:hover { background: var(--md-sys-color-surface-container-high); }
   button.active { color: var(--md-sys-color-primary); }
   .material-symbols-outlined { font-size: 19px; }
   .mini-titlebar .material-symbols-outlined { font-size: 16px; }
-  .mini-track { display: flex; gap: 12px; align-items: center; padding: 12px 14px 6px; min-height: 74px; }
-  .mini-art { width: 52px; height: 52px; flex: 0 0 52px; display: grid; place-items: center; background: var(--md-sys-color-surface-container); border: var(--hairline); }
+  .mini-track { display: flex; gap: 6px; align-items: center; padding: 6px 8px 4px; min-height: 56px; }
+  .mini-art { width: 26px; height: 32px; flex: 0 0 26px; display: grid; place-items: center; background: var(--md-sys-color-surface-container); border: var(--hairline); }
   img { width: 100%; height: 100%; object-fit: cover; }
   .mini-meta { min-width: 0; }
-  .mini-song { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini-song::before { content: "> "; color: var(--md-sys-color-primary); }
+  .mini-artist::before { content: "by "; opacity: .6; }
+  .mini-state::before { content: "[ "; }
+  .mini-state::after { content: " ] ▌"; }
+  .mini-song { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mini-artist { color: var(--md-sys-color-on-surface-variant); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mini-state { color: var(--md-sys-color-primary); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
-  .mini-seek { display: flex; align-items: center; gap: 9px; padding: 2px 14px; font-size: 10px; color: var(--md-sys-color-on-surface-variant); }
-  input[type=range] { accent-color: var(--md-sys-color-primary); min-width: 0; height: 16px; }
+  .mini-state { color: var(--md-sys-color-primary); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .mini-seek { display: flex; align-items: center; gap: 6px; padding: 0 10px; font-size: 10px; color: var(--md-sys-color-on-surface-variant); }
+  input[type=range] { appearance: none; background: transparent; min-width: 0; height: 16px; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 6px; background: repeating-linear-gradient(to right, var(--md-sys-color-outline) 0 3px, transparent 3px 5px); }
+  input[type=range]::-webkit-slider-thumb { appearance: none; width: 7px; height: 12px; margin-top: -3px; border-radius: 0; background: var(--md-sys-color-primary); }
+  input:disabled { opacity: .4; cursor: default; }
   .mini-seek input { flex: 1; }
-  .mini-controls { display: flex; align-items: center; gap: 6px; padding: 4px 14px 8px; }
-  .mini-controls button { height: 30px; width: 34px; }
-  .mini-play { color: var(--md-sys-color-on-primary); background: var(--md-sys-color-primary); }
-  .mini-play:hover { filter: brightness(1.1); background: var(--md-sys-color-primary); }
-  .volume-icon { margin-left: auto; color: var(--md-sys-color-on-surface-variant); }
-  .mini-controls input { width: 100px; }
+  .mini-controls { display: flex; align-items: center; gap: 6px; padding: 4px 8px; }
+  .mini-controls button { height: 28px; flex: 1; border: 1px solid var(--md-sys-color-outline); font-size: 11px; }
+  .mini-controls .mini-play { flex: 1.5; color: var(--md-sys-color-primary); border-color: var(--md-sys-color-primary); }
+  .prompt { color: var(--md-sys-color-primary); font-size: 12px; }
+  .mini-volume { display: flex; align-items: center; gap: 8px; padding: 0 8px 6px; font-size: 10px; color: var(--md-sys-color-on-surface-variant); }
+  .mini-volume input { flex: 1; width: 0; }
+  .volume-value { min-width: 4ch; text-align: right; }
 </style>

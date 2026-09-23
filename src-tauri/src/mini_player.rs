@@ -1,8 +1,8 @@
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const LABEL: &str = "mini-player";
-const WIDTH: f64 = 420.0;
-const HEIGHT: f64 = 194.0;
+const WIDTH: f64 = 220.0;
+const HEIGHT: f64 = 180.0;
 
 fn restore_main(app: &AppHandle) {
     if let Some(main) = app.get_window(crate::ytm::WINDOW_LABEL) {
@@ -69,7 +69,7 @@ pub async fn open_mini_player(app: AppHandle) -> Result<(), String> {
     }
     mini.show().map_err(|e| e.to_string())?;
     mini.set_focus().map_err(|e| e.to_string())?;
-    main.minimize().map_err(|e| e.to_string())?;
+    main.hide().map_err(|e| e.to_string())?;
     Ok(())
 }
 
