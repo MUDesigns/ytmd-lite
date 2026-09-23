@@ -7,6 +7,7 @@
   import type { MiniPlayerUpdate } from "$lib/mini-player";
   import { applyAccent } from "$lib/accent";
   import { thumb } from "$lib/api";
+  import VolumeValue from "$lib/ui/VolumeValue.svelte";
   let player = $state<PlayerState>({ videoDetails: null, trackState: "Unknown" });
   let pinned = $state(true);
   let error = $state("");
@@ -70,7 +71,7 @@
     <button aria-label="Next track" title="Next track" disabled={!player.videoDetails} onclick={() => command("next")}> &gt;|</button>
   </div>
   <div class="mini-volume">
-    <span class="volume-icon" aria-hidden="true">vol</span><input aria-label="Volume" type="range" min="0" max="100" value={player.volume ?? 100} oninput={(e) => command(`volume:${e.currentTarget.value}`)} /><span class="volume-value">{Math.round(player.volume ?? 100)}%</span>
+    <span class="volume-icon" aria-hidden="true">vol</span><input aria-label="Volume" type="range" min="0" max="100" value={player.volume ?? 100} oninput={(e) => command(`volume:${e.currentTarget.value}`)} /><VolumeValue value={player.volume ?? 100} onchange={(value) => command(`volume:${value}`)} percent />
   </div>
 </main>
 
@@ -107,5 +108,4 @@
   .prompt { color: var(--md-sys-color-primary); font-size: 12px; }
   .mini-volume { display: flex; align-items: center; gap: 8px; padding: 0 8px 6px; font-size: 10px; color: var(--md-sys-color-on-surface-variant); }
   .mini-volume input { flex: 1; width: 0; }
-  .volume-value { min-width: 4ch; text-align: right; }
 </style>

@@ -3,6 +3,7 @@
   import { thumb } from "$lib/api";
   import * as playerCtl from "$lib/player";
   import ArtistLinks from "./ArtistLinks.svelte";
+  import VolumeValue from "./VolumeValue.svelte";
   import { codeTheme } from "$lib/theme";
 
   let {
@@ -244,7 +245,7 @@
       </button>
       <span class="label">vol</span>
       <input class="bar vol" type="range" min="0" max="100" value={volume} oninput={onVolume} />
-      <span class="t vol-n">{volume}</span>
+      <VolumeValue value={volume} onchange={playerCtl.setVolume} />
     </div>
   </div>
 </footer>
@@ -557,10 +558,6 @@
   .t {
     min-width: 28px;
     text-align: center;
-  }
-  .vol-n {
-    min-width: 22px;
-    text-align: right;
   }
   .label {
     letter-spacing: 0.04em;

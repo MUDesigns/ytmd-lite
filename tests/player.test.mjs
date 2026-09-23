@@ -19,6 +19,50 @@ let instance = 0;
 const track = (videoId) => ({ videoId, title: videoId });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+function mockStorage(t, value) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value });
+  t.after(() => original ? Object.defineProperty(globalThis, "localStorage", original) : delete globalThis.localStorage);
+}
+
+test("volume survives a fresh player instance, including zero", async (t) => {
+  const saved = new Map();
+  mockStorage(t, {
+    getItem: key => saved.get(key) ?? null,
+    setItem: (key, value) => saved.set(key, value),
+  });
+  let { player } = await setup(t);
+  assert.equal(player.getSnapshot().volume, 100);
+  for (const volume of [37, 0]) {
+    await player.handleMediaCommand(`volume:${volume}`);
+    const reopened = await setup(t);
+    player = reopened.player;
+    assert.equal(player.getSnapshot().volume, volume);
+    await player.playItem(track("a"));
+    assert.equal(reopened.audios[0].volume, volume / 100);
+  }
+});
+
+test("invalid or unavailable volume storage does not prevent playback", async (t) => {
+  let raw;
+  mockStorage(t, {
+    getItem: () => {
+      if (raw === undefined) throw new Error("unavailable");
+      return raw;
+    },
+    setItem: () => { throw new Error("unavailable"); },
+  });
+  for (raw of ["invalid", "null", "-1", "101", '"42"']) {
+    const { player } = await setup(t);
+    assert.equal(player.getSnapshot().volume, 100);
+  }
+  raw = undefined;
+  const { player, audios } = await setup(t);
+  await player.setVolume(25);
+  await player.playItem(track("a"));
+  assert.equal(audios[0].volume, .25);
+});
+
 test("audio outputs omit anonymous duplicates so palette entries have stable unique IDs", async (t) => {
   const { player } = await setup(t);
   const original = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");

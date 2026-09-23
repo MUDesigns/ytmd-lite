@@ -5,10 +5,20 @@ import { albumKey, arrangeQueue, readHeard, rememberHeard, type QueueRules, type
 
 type Listener = (state: PlayerState) => void;
 
+const VOLUME_KEY = "ytmd.volume.v1";
+
+function readVolume(): number {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(VOLUME_KEY) ?? "100");
+    if (typeof saved === "number" && Number.isFinite(saved) && saved >= 0 && saved <= 100) return saved;
+  } catch { /* Storage may be unavailable or contain invalid data. */ }
+  return 100;
+}
+
 let audio: HTMLAudioElement | null = null;
 let queue: QueueItem[] = [];
 let queueIndex = -1;
-let volume = 100;
+let volume = readVolume();
 let listeners = new Set<Listener>();
 let progressTimer: ReturnType<typeof setInterval> | null = null;
 /** User explicitly paused — ignore spurious play/playing events from the stream. */
@@ -38,6 +48,7 @@ let recordedHeard = false;
 function ensureAudio() {
   if (audio) return audio;
   audio = new Audio();
+  audio.volume = volume / 100;
   audio.preload = "auto";
   audio.addEventListener("ended", () => {
     const item = currentItem();
@@ -663,7 +674,7 @@ export async function restoreSession(session: ListeningSession) {
   clearQueue();
   queue = session.queue.map(t => ({ ...t, thumbnails: [...t.thumbnails], selected: false }));
   queueIndex = session.index;
-  volume = session.volume;
+  await setVolume(session.volume);
   shuffleOn = session.shuffle;
   repeatMode = session.repeat;
   stopAfterAlbum = session.stopAfterAlbum || "";
@@ -673,7 +684,10 @@ export async function restoreSession(session: ListeningSession) {
 }
 
 export async function setVolume(v: number) {
+  if (!Number.isFinite(v)) return;
   volume = Math.max(0, Math.min(100, v));
+  try { localStorage.setItem(VOLUME_KEY, JSON.stringify(volume)); }
+  catch { /* Keep volume controls working when storage is unavailable. */ }
   const a = ensureAudio();
   a.volume = volume / 100;
   sync();
