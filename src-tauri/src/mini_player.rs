@@ -28,9 +28,11 @@ pub async fn open_mini_player(app: AppHandle) -> Result<(), String> {
         window
     } else {
         let url = if cfg!(debug_assertions) {
-            WebviewUrl::External("http://localhost:1420/mini".parse().map_err(|e: url::ParseError| e.to_string())?)
+            WebviewUrl::External("http://localhost:1420/mini/".parse().map_err(|e: url::ParseError| e.to_string())?)
         } else {
-            WebviewUrl::App("mini/index.html".into())
+            // Use the router URL; Tauri resolves its assets to mini/index.html.
+            // Opening that filename directly makes Svelte route to a 404 page.
+            WebviewUrl::App("mini/".into())
         };
         let window = WebviewWindowBuilder::new(&app, LABEL, url)
             .title("YTMD Lite — Mini player")
