@@ -14,6 +14,8 @@ export type ArtistLink = {
 };
 
 export type MusicItem = {
+  album?: string;
+  albumId?: string;
   type: "song" | "album" | "artist" | "playlist" | "shelf" | "mood";
   id: string;
   title: string;
@@ -52,6 +54,8 @@ export type EngineStatus = {
 };
 
 export type QueueItem = {
+  album?: string;
+  albumId?: string;
   videoId: string;
   title: string;
   author: string;
@@ -72,6 +76,7 @@ export type PlayerState = {
     thumbnails?: string[];
   } | null;
   trackState: string;
+  playbackError?: string;
   videoProgress?: number;
   volume?: number;
   muted?: boolean;
@@ -81,6 +86,7 @@ export type PlayerState = {
   playlistId?: string;
   shuffle?: boolean;
   repeat?: "off" | "one" | "all";
+  stopAfterAlbum?: string;
 };
 
 export type LastFmStatus = {

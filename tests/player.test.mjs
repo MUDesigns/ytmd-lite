@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import ts from "typescript";
 
+const listeningSource = await readFile(new URL("../src/lib/listening.ts", import.meta.url), "utf8");
+const listeningCode = ts.transpileModule(listeningSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const listeningUrl = `data:text/javascript;base64,${Buffer.from(listeningCode).toString("base64")}`;
+
 const source = (await readFile(new URL("../src/lib/player.ts", import.meta.url), "utf8"))
+  .replace('from "./listening"', `from "${listeningUrl}"`)
   .replace('import { invoke } from "@tauri-apps/api/core";', 'const invoke = async () => {};')
   .replace('import { API_BASE, streamUrl } from "./api";',
     'const API_BASE = "http://localhost"; const streamUrl = id => `/audio-stream/${id}`;');
@@ -14,6 +19,60 @@ let instance = 0;
 const track = (videoId) => ({ videoId, title: videoId });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test("audio outputs omit anonymous duplicates so palette entries have stable unique IDs", async (t) => {
+  const { player } = await setup(t);
+  const original = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: {
+    getUserMedia: async () => ({ getTracks: () => [] }),
+    enumerateDevices: async () => [
+      { kind: "audiooutput", deviceId: "", label: "" },
+      { kind: "audiooutput", deviceId: "speakers", label: "Speakers" },
+      { kind: "audiooutput", deviceId: "speakers", label: "Speakers" },
+    ],
+  } });
+  t.after(() => original ? Object.defineProperty(navigator, "mediaDevices", original) : delete navigator.mediaDevices);
+  assert.deepEqual(await player.listAudioOutputs(), [{ id: "", label: "System default" }, { id: "speakers", label: "Speakers" }]);
+});
+
+test("restoring a session resumes at its exact position and replaces the old queue", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItems([track("old")]);
+  await player.restoreSession({ queue: [{ videoId: "saved", title: "Saved", author: "Artist", thumbnails: [], selected: false, albumId: "album" }], index: 0, position: 73.5, volume: 42, shuffle: false, repeat: "off", stopAfterAlbum: "album" });
+  assert.equal(audios[0].src, "/audio-stream/saved");
+  assert.equal(audios[0].currentTime, 73.5);
+  assert.equal(audios[0].volume, .42);
+  assert.equal(player.getSnapshot().stopAfterAlbum, "album");
+  assert.equal(player.getSnapshot().queue.length, 1);
+});
+
+test("applying queue rules preserves the playing source and position", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItems([{ ...track("a1"), subtitle: "A", albumId: "a" }, { ...track("b1"), subtitle: "B", albumId: "b" }, { ...track("a2"), subtitle: "A", albumId: "a" }]);
+  await player.seek(25);
+  player.applyQueueRules({ noRepeatArtists: false, unplayedOnly: false, keepAlbums: true });
+  assert.deepEqual(player.getSnapshot().queue.map(t => t.videoId), ["a1", "a2", "b1"]);
+  assert.equal(audios[0].currentTime, 25);
+  assert.equal(audios[0].src, "/audio-stream/a1");
+  assert.equal(audios[0].paused, false);
+});
+
+test("stop after album advances inside the album and pauses before the next one", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItems([{ ...track("a1"), albumId: "a" }, { ...track("a2"), albumId: "a" }, { ...track("b1"), albumId: "b" }]);
+  player.toggleRepeat();
+  player.setStopAfterAlbum(true);
+  assert.equal(player.getSnapshot().repeat, "off");
+  audios[0].dispatchEvent(new Event("ended"));
+  await flush();
+  assert.equal(player.getSnapshot().videoDetails.id, "a2");
+  audios[0].dispatchEvent(new Event("ended"));
+  await flush();
+  assert.equal(player.getSnapshot().videoDetails.id, "a2");
+  assert.equal(player.getSnapshot().trackState, "Paused");
+  assert.equal(audios[0].paused, true);
+  assert.equal(player.getSnapshot().stopAfterAlbum, undefined);
+});
+
 async function setup(t, fetchImpl = async () => Response.json({ ok: true })) {
   const audios = [];
   class FakeAudio extends EventTarget {
@@ -23,11 +82,14 @@ async function setup(t, fetchImpl = async () => Response.json({ ok: true })) {
     currentTime = 0;
     duration = 120;
     autoReady = true;
+    error = null;
     constructor() { super(); audios.push(this); }
     pause() { this.paused = true; }
     removeAttribute() { this.src = ""; this.readyState = 0; }
     getAttribute() { return this.src; }
     load() {
+      this.error = null;
+      this.currentTime = 0;
       if (this.src && this.autoReady) queueMicrotask(() => {
         this.readyState = 3;
         this.dispatchEvent(new Event("canplay"));
@@ -41,6 +103,7 @@ async function setup(t, fetchImpl = async () => Response.json({ ok: true })) {
   }
   globalThis.Audio = FakeAudio;
   globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
+  globalThis.MediaError = { MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 };
   t.mock.method(globalThis, "setInterval", () => 1);
   t.mock.method(globalThis, "clearInterval", () => {});
   const fetchMock = t.mock.method(globalThis, "fetch", fetchImpl);
@@ -89,7 +152,7 @@ test("an extraction error is not retried through another endpoint", async (t) =>
   const { player, fetchMock } = await setup(t, async () => Response.json({ ok: false, error: "offline" }, { status: 503 }));
   await assert.rejects(player.playItem(track("a")), /offline/);
   assert.equal(fetchMock.mock.callCount(), 1);
-  assert.equal(player.getSnapshot().trackState, "Paused");
+  assert.equal(player.getSnapshot().trackState, "Error");
 });
 
 test("pause during resolution prevents autoplay and can resume the loaded track", async (t) => {
@@ -133,4 +196,69 @@ test("preparation failures do not stop current playback", async (t) => {
   await player.playItems([track("current"), track("next")]);
   await flush();
   assert.equal(player.getSnapshot().trackState, "Playing");
+});
+
+test("a network interruption refreshes the stream and resumes at the same position", async (t) => {
+  const { player, audios, fetchMock } = await setup(t);
+  await player.playItem(track("a"));
+  audios[0].currentTime = 73;
+  audios[0].error = { code: 2 };
+  audios[0].dispatchEvent(new Event("error"));
+  await flush();
+  assert.equal(audios[0].currentTime, 73);
+  assert.equal(player.getSnapshot().trackState, "Playing");
+  assert.match(fetchMock.mock.calls.at(-1).arguments[0], /refresh=1/);
+  // The same track cannot enter an endless automatic reload loop.
+  audios[0].currentTime = 80;
+  audios[0].error = { code: 2 };
+  audios[0].dispatchEvent(new Event("error"));
+  await flush();
+  assert.equal(player.getSnapshot().trackState, "Error");
+  assert.equal(fetchMock.mock.callCount(), 2);
+  await player.playPause();
+  assert.equal(audios[0].currentTime, 80);
+  assert.equal(player.getSnapshot().trackState, "Playing");
+});
+
+test("a track change cancels recovery and starts the new song at zero", async (t) => {
+  let finishRecovery;
+  const { player, audios } = await setup(t, url => url.includes("refresh=1")
+    ? new Promise(resolve => { finishRecovery = resolve; })
+    : Promise.resolve(Response.json({ ok: true })));
+  await player.playItem(track("a"));
+  audios[0].currentTime = 73;
+  audios[0].error = { code: 2 };
+  audios[0].dispatchEvent(new Event("error"));
+  await player.playItem(track("b"));
+  finishRecovery(Response.json({ ok: true }));
+  await flush();
+  assert.equal(audios[0].src, "/audio-stream/b");
+  assert.equal(audios[0].currentTime, 0);
+  assert.equal(player.getSnapshot().trackState, "Playing");
+});
+
+test("a network error while paused does not resume without permission", async (t) => {
+  const { player, audios, fetchMock } = await setup(t);
+  await player.playItem(track("a"));
+  audios[0].currentTime = 50;
+  await player.playPause();
+  audios[0].error = { code: 2 };
+  audios[0].dispatchEvent(new Event("error"));
+  await flush();
+  assert.equal(fetchMock.mock.callCount(), 1);
+  assert.equal(audios[0].paused, true);
+  await player.playPause();
+  assert.equal(audios[0].currentTime, 50);
+});
+
+test("recovery remembers progress even if the media element resets its clock on error", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItem(track("a"));
+  audios[0].currentTime = 60;
+  audios[0].dispatchEvent(new Event("timeupdate"));
+  audios[0].currentTime = 0;
+  audios[0].error = { code: 2 };
+  audios[0].dispatchEvent(new Event("error"));
+  await flush();
+  assert.equal(audios[0].currentTime, 60);
 });

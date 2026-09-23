@@ -2,6 +2,7 @@
   import type { ArtistLink, MusicItem } from "$lib/types";
   import { thumb } from "$lib/api";
   import ArtistLinks from "./ArtistLinks.svelte";
+  import { codeTheme } from "$lib/theme";
 
   let {
     item,
@@ -77,7 +78,23 @@
     {/if}
   </div>
   <div class="meta">
-    <div class="title">{item.title}</div>
+    {#if $codeTheme}
+      <div class="code-entry" title={item.title}>
+        <span class="code-entry-kind">{item.type}</span><span class="code-punctuation" aria-hidden="true">({`{`}</span>
+        <span class="code-entry-key" aria-hidden="true">title:</span>
+        <span class="code-entry-title">"{item.title}"</span>
+        <span class="code-punctuation" aria-hidden="true">{`}`});</span>
+      </div>
+      <div class="sub code-entry-comment">
+        <span class="code-punctuation" aria-hidden="true">//</span>
+        {#if showArtistLinks && (item.artistLinks?.length || item.subtitle)}
+          <ArtistLinks artists={item.artistLinks} fallback={item.subtitle || ""} onopen={onartist} />
+        {:else}
+          <span>{item.subtitle || `Open ${item.type}`}</span>
+        {/if}
+      </div>
+    {:else}
+    <div class="title" title={item.title}>{item.title}</div>
     {#if showArtistLinks && (item.artistLinks?.length || item.subtitle)}
       <div class="sub">
         <ArtistLinks artists={item.artistLinks} fallback={item.subtitle || ""} onopen={onartist} />
@@ -87,7 +104,15 @@
     {:else}
       <div class="sub">{item.type}</div>
     {/if}
+    {/if}
   </div>
+  {#if $codeTheme}
+    {#if canPlay && !isMood}
+      <button type="button" class="code-file-play" title={`Play ${item.title}`} aria-label={`Play ${item.title}`} onclick={play}>
+        <span class="code-punctuation" aria-hidden="true">$</span> play
+      </button>
+    {/if}
+  {/if}
 </div>
 
 <style>

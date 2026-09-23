@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { API_BASE, streamUrl } from "./api";
 import type { MusicItem, PlayerState, QueueItem } from "./types";
+import { albumKey, arrangeQueue, readHeard, rememberHeard, type QueueRules, type ListeningSession } from "./listening";
 
 type Listener = (state: PlayerState) => void;
 
@@ -25,14 +26,32 @@ let likeStatus = "INDIFFERENT";
 let activeLoad: AbortController | null = null;
 let prewarm: { videoId: string; controller: AbortController } | null = null;
 let playbackTiming: { videoId: string; started: number; resolved?: number } | null = null;
+let playbackError = "";
+let resumePosition = 0;
+let recoveryAttempts = 0;
+let waitingForAudio = false;
+let stopAfterAlbum = "";
+let heardSeconds = 0;
+let lastHeardPosition = 0;
+let recordedHeard = false;
 
 function ensureAudio() {
   if (audio) return audio;
   audio = new Audio();
   audio.preload = "auto";
   audio.addEventListener("ended", () => {
+    const item = currentItem();
+    if (item) rememberHeard(item.videoId);
+    if (stopAfterAlbum && albumKey(queue[queueIndex + 1]) !== stopAfterAlbum) {
+      stopAfterAlbum = "";
+      userPaused = true;
+      audio?.pause();
+      stopProgress();
+      sync("Paused");
+      return;
+    }
     userPaused = false;
-    void next();
+    void next().catch(e => console.error("[player] advance failed", e));
   });
   audio.addEventListener("play", () => {
     if (userPaused) {
@@ -50,9 +69,23 @@ function ensureAudio() {
     sync();
   });
   audio.addEventListener("waiting", () => {
+    waitingForAudio = true;
     if (!userPaused) sync("Buffering");
   });
+  audio.addEventListener("timeupdate", () => {
+    if (!loading && !playbackError && audio) {
+      resumePosition = audio.currentTime;
+      const delta = audio.currentTime - lastHeardPosition;
+      if (!audio.paused && delta > 0 && delta < 2) heardSeconds += delta;
+      lastHeardPosition = audio.currentTime;
+      if (!recordedHeard && heardSeconds >= 30 && currentItem()) {
+        rememberHeard(currentItem()!.videoId);
+        recordedHeard = true;
+      }
+    }
+  });
   audio.addEventListener("playing", () => {
+    waitingForAudio = false;
     if (userPaused) {
       audio?.pause();
       return;
@@ -70,15 +103,25 @@ function ensureAudio() {
     prepareNext();
   });
   audio.addEventListener("error", () => {
+    if (!audio?.error) return; // Ignore an error queued for a source we already replaced.
     const code = audio?.error?.code;
     const msg =
       code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
         ? "Stream format not supported (or API returned an error page)"
         : code === MediaError.MEDIA_ERR_NETWORK
-          ? "Network error loading stream — is the catalog API running on :9847?"
+          ? "Audio connection interrupted"
           : "Audio playback error";
+    if (!loading && audio.currentTime > 0) resumePosition = audio.currentTime;
+    if (code === MediaError.MEDIA_ERR_NETWORK && !userPaused && !loading && recoveryAttempts < 1) {
+      recoveryAttempts += 1;
+      console.warn("[player] recovering interrupted stream at", resumePosition);
+      void loadCurrent(true, resumePosition, true).catch((e) => console.error("[player] recovery failed", e));
+      return;
+    }
+    playbackError = "Audio stream interrupted — press Play to retry from this position";
+    waitingForAudio = false;
     userPaused = true;
-    pushState(buildState("Paused"));
+    pushState(buildState("Error"));
     console.error("[player]", msg, audio?.error);
   });
   audio.addEventListener("loadedmetadata", () => {
@@ -98,9 +141,11 @@ function buildState(trackState = "Unknown"): PlayerState {
   const duration = a && Number.isFinite(a.duration) ? Math.floor(a.duration) : 0;
 
   let resolved = trackState;
-  if (userPaused) {
+  if (playbackError) {
+    resolved = "Error";
+  } else if (userPaused) {
     resolved = "Paused";
-  } else if (loading || trackState === "Buffering") {
+  } else if (loading || waitingForAudio || trackState === "Buffering") {
     resolved = "Buffering";
   } else if (trackState === "Unknown") {
     resolved = a && !a.paused ? "Playing" : item ? "Paused" : "Unknown";
@@ -112,14 +157,16 @@ function buildState(trackState = "Unknown"): PlayerState {
           id: item.videoId,
           title: item.title,
           author: item.author || "",
-          album: "",
+          album: item.album || "",
+          albumId: item.albumId,
           channelId: item.channelId,
           durationSeconds: duration || 0,
           thumbnails: item.thumbnails || [],
         }
       : null,
     trackState: resolved,
-    videoProgress: a?.currentTime ?? 0,
+    videoProgress: loading || playbackError ? resumePosition : a?.currentTime ?? 0,
+    playbackError: playbackError || undefined,
     volume,
     muted: a?.muted ?? false,
     likeStatus,
@@ -128,6 +175,7 @@ function buildState(trackState = "Unknown"): PlayerState {
     playlistId: "",
     shuffle: shuffleOn,
     repeat: repeatMode,
+    stopAfterAlbum: stopAfterAlbum || undefined,
   };
 }
 
@@ -169,6 +217,8 @@ function toQueueItem(item: MusicItem): QueueItem | null {
     thumbnails: item.thumbnails || [],
     selected: false,
     channelId: item.artistBrowseId || item.artistLinks?.find((a) => a.browseId)?.browseId,
+    album: item.album,
+    albumId: item.albumId,
   };
 }
 
@@ -201,8 +251,8 @@ function errMsg(e: unknown): string {
 }
 
 /** Resolve once; retrying through another endpoint repeats the same extraction. */
-async function resolveSrc(videoId: string, signal: AbortSignal): Promise<string> {
-  const res = await fetch(`${API_BASE}/audio-stream/${encodeURIComponent(videoId)}/warm`, { signal });
+async function resolveSrc(videoId: string, signal: AbortSignal, refresh = false): Promise<string> {
+  const res = await fetch(`${API_BASE}/audio-stream/${encodeURIComponent(videoId)}/warm${refresh ? "?refresh=1" : ""}`, { signal });
   const data = await res.json();
   if (data.premium_only) throw new Error("This track requires YouTube Premium");
   if (!res.ok || !data.ok) throw new Error(data.error || "Could not resolve audio stream");
@@ -218,6 +268,11 @@ function prepareNext() {
     index = shuffleBag[0];
   } else if (index >= queue.length && repeatMode === "all") index = 0;
   const videoId = queue[index]?.videoId;
+  if (stopAfterAlbum && albumKey(queue[index]) !== stopAfterAlbum) {
+    prewarm?.controller.abort();
+    prewarm = null;
+    return;
+  }
   if (prewarm?.videoId === videoId) return;
   prewarm?.controller.abort();
   prewarm = null;
@@ -277,6 +332,7 @@ export async function playItems(items: MusicItem[], startIndex = 0) {
   const mapped = playableItems(items);
   if (!mapped.length) throw new Error("No playable tracks");
   queue = mapped;
+  stopAfterAlbum = "";
   queueIndex = Math.max(0, Math.min(startIndex, mapped.length - 1));
   likeStatus = "INDIFFERENT";
   if (shuffleOn) rebuildShuffleBag(queueIndex);
@@ -290,6 +346,7 @@ export async function playItemsShuffled(items: MusicItem[]) {
   const mapped = playableItems(items);
   if (!mapped.length) throw new Error("No playable tracks");
   queue = shuffleArray(mapped);
+  stopAfterAlbum = "";
   queueIndex = 0;
   shuffleOn = true;
   likeStatus = "INDIFFERENT";
@@ -341,11 +398,16 @@ export function playNext(items: MusicItem | MusicItem[]) {
 }
 
 export function clearQueue() {
+  stopAfterAlbum = "";
   activeLoad?.abort();
   activeLoad = null;
   prewarm?.controller.abort();
   prewarm = null;
   playbackTiming = null;
+  playbackError = "";
+  resumePosition = 0;
+  recoveryAttempts = 0;
+  waitingForAudio = false;
   loading = false;
   userPaused = true;
   stopProgress();
@@ -363,6 +425,7 @@ export function clearQueue() {
 }
 
 export function toggleShuffle(): boolean {
+  stopAfterAlbum = "";
   shuffleOn = !shuffleOn;
   if (shuffleOn && queue.length) rebuildShuffleBag(queueIndex >= 0 ? queueIndex : undefined);
   else shuffleBag = [];
@@ -372,6 +435,7 @@ export function toggleShuffle(): boolean {
 }
 
 export function toggleRepeat(): "off" | "one" | "all" {
+  stopAfterAlbum = "";
   repeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
   sync();
   prepareNext();
@@ -387,10 +451,17 @@ export function getLikeStatus() {
   return likeStatus;
 }
 
-async function loadCurrent(autoplay: boolean) {
+async function loadCurrent(autoplay: boolean, resumeAt = 0, recovering = false) {
   const item = currentItem();
   if (!item) return;
   const a = ensureAudio();
+  const refresh = recovering || !!playbackError;
+  if (!recovering) recoveryAttempts = 0;
+  if (!recovering) { heardSeconds = 0; recordedHeard = false; }
+  lastHeardPosition = resumeAt;
+  resumePosition = resumeAt;
+  playbackError = "";
+  waitingForAudio = false;
   activeLoad?.abort();
   const controller = new AbortController();
   activeLoad = controller;
@@ -410,7 +481,7 @@ async function loadCurrent(autoplay: boolean) {
 
   const resolveTimer = setTimeout(() => controller.abort(new Error("Timed out resolving audio stream")), 30000);
   try {
-    const src = await resolveSrc(item.videoId, signal);
+    const src = await resolveSrc(item.videoId, signal, refresh);
     clearTimeout(resolveTimer);
     signal.throwIfAborted();
     playbackTiming = { videoId: item.videoId, started, resolved: performance.now() };
@@ -423,6 +494,12 @@ async function loadCurrent(autoplay: boolean) {
 
     if (autoplay) {
       await waitCanPlay(a, signal);
+      signal.throwIfAborted();
+      if (resumePosition > 0) {
+        a.currentTime = resumePosition;
+        await waitCanPlay(a, signal);
+        signal.throwIfAborted();
+      }
       if (userPaused) {
         sync("Paused");
         return;
@@ -441,9 +518,11 @@ async function loadCurrent(autoplay: boolean) {
     // A newer selection aborts the old request; only this load owns its state.
     loading = false;
     userPaused = true;
+    waitingForAudio = false;
+    playbackError = "Audio stream unavailable — press Play to retry from this position";
     playbackTiming = null;
     a.pause();
-    sync("Paused");
+    sync("Error");
     throw new Error(errMsg(e));
   } finally {
     clearTimeout(resolveTimer);
@@ -457,6 +536,7 @@ async function loadCurrent(autoplay: boolean) {
 export async function playQueueIndex(index: number) {
   if (index < 0 || index >= queue.length) return;
   queueIndex = index;
+  if (stopAfterAlbum && albumKey(queue[index]) !== stopAfterAlbum) stopAfterAlbum = "";
   userPaused = false;
   await loadCurrent(true);
 }
@@ -472,7 +552,7 @@ export async function playPause() {
   }
 
   if (a.paused || userPaused) {
-    if (!a.getAttribute("src") || a.error) return loadCurrent(true);
+    if (playbackError || !a.getAttribute("src") || a.error) return loadCurrent(true, resumePosition);
     userPaused = false;
     try {
       await a.play();
@@ -491,6 +571,7 @@ export async function playPause() {
 }
 
 export async function next() {
+  if (stopAfterAlbum && albumKey(queue[queueIndex + 1]) !== stopAfterAlbum) stopAfterAlbum = "";
   if (repeatMode === "one" && queueIndex >= 0) {
     const a = ensureAudio();
     a.currentTime = 0;
@@ -542,14 +623,53 @@ export async function previous() {
     return;
   }
   queueIndex -= 1;
+  if (stopAfterAlbum && albumKey(currentItem() || undefined) !== stopAfterAlbum) stopAfterAlbum = "";
   userPaused = false;
   await loadCurrent(true);
 }
 
 export async function seek(seconds: number) {
   const a = ensureAudio();
+  resumePosition = Math.max(0, seconds);
+  lastHeardPosition = resumePosition;
+  if (playbackError || loading) {
+    sync();
+    return;
+  }
   a.currentTime = seconds;
   sync();
+}
+
+/** Rules are applied explicitly to the upcoming queue after the user previews them. */
+export function applyQueueRules(rules: QueueRules) {
+  queue = arrangeQueue(queue, queueIndex, rules, readHeard());
+  shuffleOn = false;
+  shuffleBag = [];
+  sync();
+  prepareNext();
+}
+
+export function setStopAfterAlbum(enabled: boolean) {
+  const key = albumKey(currentItem() || undefined);
+  if (enabled && !key) throw new Error("Album information is unavailable for this track. Start playback from an album page.");
+  stopAfterAlbum = enabled ? key : "";
+  if (enabled) { shuffleOn = false; shuffleBag = []; repeatMode = "off"; }
+  sync();
+  prepareNext();
+}
+
+export async function restoreSession(session: ListeningSession) {
+  if (!session.queue.length || !session.queue[session.index]) throw new Error("This session has no playable queue.");
+  clearQueue();
+  queue = session.queue.map(t => ({ ...t, thumbnails: [...t.thumbnails], selected: false }));
+  queueIndex = session.index;
+  volume = session.volume;
+  shuffleOn = session.shuffle;
+  repeatMode = session.repeat;
+  stopAfterAlbum = session.stopAfterAlbum || "";
+  if (stopAfterAlbum) { shuffleOn = false; repeatMode = "off"; }
+  if (shuffleOn) rebuildShuffleBag(queueIndex);
+  await loadCurrent(true, session.position);
 }
 
 export async function setVolume(v: number) {
@@ -568,7 +688,7 @@ export async function listAudioOutputs(): Promise<Array<{ id: string; label: str
     /* still try enumerate — may only get default */
   }
   const all = await navigator.mediaDevices.enumerateDevices();
-  const outs = all.filter((d) => d.kind === "audiooutput");
+  const outs = [...new Map(all.filter((d) => d.kind === "audiooutput" && d.deviceId).map(d => [d.deviceId, d])).values()];
   const devices = [
     { id: "", label: "System default" },
     ...outs.map((d, i) => ({
@@ -608,7 +728,7 @@ export async function handleMediaCommand(command: string) {
         return;
       }
       const a = ensureAudio();
-      if (!a.getAttribute("src") || a.error) return loadCurrent(true);
+      if (playbackError || !a.getAttribute("src") || a.error) return loadCurrent(true, resumePosition);
       await a.play();
       sync("Playing");
       return;

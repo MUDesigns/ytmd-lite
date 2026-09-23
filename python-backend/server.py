@@ -15,6 +15,7 @@ if __name__ == "__main__" and "--check-playback" in sys.argv:
     from yt_dlp.extractor.youtube.pot._registry import _pot_providers
     from yt_dlp_ejs.yt import solver
     from stream_resolver import StreamResolver
+    from audio_proxy import AudioStream
     with yt_dlp.YoutubeDL({"quiet": True}):
         if not solver.core() or not solver.lib():
             raise RuntimeError("Bundled JavaScript challenge solver missing")
@@ -2949,62 +2950,48 @@ def stream_prepare(video_id):
 
 
 # ── Progressive streaming proxy ─────────────────────────────────────────────
-# Range-forwarding proxy so the Rust audio core can stream a song (fast start) instead of
-# downloading it whole first, while keeping playback in the app process (OBS-capturable).
-# The resolved googlevideo URL is cached per video (it's expensive to extract and the Rust
-# source makes several range requests per song).
+from audio_proxy import AudioStream, AudioProxyError
+
+
 @app.route("/audio-stream/<video_id>")
 def audio_stream(video_id):
-    import requests as req
     key = (_current_profile, video_id)
     started = time.monotonic()
-    up_headers = {"User-Agent": "Mozilla/5.0"}
-    if request.headers.get("Range"):
-        up_headers["Range"] = request.headers["Range"]
-
-    upstream = None
+    stream = None
     for attempt in range(2):
         result = _stream_resolver.resolve(key)
         if not result.get("url"):
             return jsonify(result), 403 if result.get("premium_only") else 503
         try:
-            upstream = req.get(result["url"], headers=up_headers, stream=True, timeout=(6, 15))
-        except req.RequestException:
-            return jsonify({"error": "Audio connection failed; please try again"}), 502
-        if upstream.status_code in (403, 410) and attempt == 0:
-            upstream.close()
-            _stream_resolver.invalidate(key)
-            continue
-        break
+            stream = AudioStream(result["url"], request.headers.get("Range"))
+            break
+        except AudioProxyError as exc:
+            if exc.status in (403, 410) and attempt == 0:
+                _stream_resolver.invalidate(key)
+                continue
+            headers = {"Content-Range": f"bytes */{exc.total}"} if exc.total is not None else {}
+            return jsonify({"error": str(exc)}), exc.status, headers
 
-    resp_headers = {"Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Range, Accept-Ranges"}
-    for h in ("Content-Type", "Content-Length", "Content-Range"):
-        if upstream.headers.get(h):
-            resp_headers[h] = upstream.headers[h]
-    ctype = upstream.headers.get("Content-Type", "audio/mp4")
+    _logging.info("[stream timing] %s first verified audio bytes in %dms", video_id,
+                  round((time.monotonic() - started) * 1000))
     def gen():
-        first = True
         try:
-            # Smaller chunks reduce first-byte latency on slower upstreams.
-            for chunk in upstream.iter_content(chunk_size=16384):
-                if chunk:
-                    if first:
-                        _logging.info("[stream timing] %s first proxy bytes in %dms", video_id,
-                                      round((time.monotonic() - started) * 1000))
-                        first = False
-                    yield chunk
-        finally:
-            upstream.close()
-    response = Response(gen(), status=upstream.status_code, headers=resp_headers, content_type=ctype)
-    response.call_on_close(upstream.close)
+            yield from stream.chunks()
+        except AudioProxyError as exc:
+            _logging.warning("[audio proxy] %s interrupted: %s", video_id, exc)
+            raise
+    response = Response(gen(), status=stream.status, headers=stream.headers)
+    response.call_on_close(stream.close)
     return response
 
 
 @app.route("/audio-stream/<video_id>/warm")
 def audio_stream_warm(video_id):
     """Resolve the upcoming track without transferring audio; share foreground work."""
-    result = _stream_resolver.resolve((_current_profile, video_id))
+    key = (_current_profile, video_id)
+    if request.args.get("refresh") == "1":
+        _stream_resolver.invalidate(key)
+    result = _stream_resolver.resolve(key)
     ok = bool(result.get("url"))
     return jsonify({k: v for k, v in {**result, "ok": ok}.items() if k != "url"}), 200 if ok else 503
 
@@ -3581,6 +3568,7 @@ def get_artist(browse_id):
                 "browseId": a.get("browseId", ""),
                 "title": a.get("title", ""),
                 "year": a.get("year", ""),
+                "releaseType": a.get("type", "") or "Album",
                 "thumbnail": _pick_thumb(thumbs),
             })
 
@@ -3592,6 +3580,7 @@ def get_artist(browse_id):
                 "browseId": s.get("browseId", ""),
                 "title": s.get("title", ""),
                 "year": s.get("year", ""),
+                "releaseType": s.get("type", ""),
                 "thumbnail": _pick_thumb(thumbs),
             })
 

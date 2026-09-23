@@ -38,8 +38,75 @@
   import ContextMenu, { type MenuAction } from "$lib/ui/ContextMenu.svelte";
   import { applyAccent, DEFAULT_ACCENT, normalizeAccent } from "$lib/accent";
   import { checkForAppUpdates } from "$lib/updater";
+  import { codeTheme, loadCodeTheme, setCodeTheme } from "$lib/theme";
+  import CommandPalette from "$lib/ui/CommandPalette.svelte";
+  import QueueWorkspace from "$lib/ui/QueueWorkspace.svelte";
+  import WorkbenchExplorer from "$lib/ui/WorkbenchExplorer.svelte";
+  import { defaultWorkbenchFiles, loadWorkbenchFiles, workbenchFilename, viewLabels } from "$lib/workbench";
+  import { readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
+  import type { PaletteCommand } from "$lib/commands";
 
   let panel = $state<Panel>("home");
+  let paletteOpen = $state(false);
+  let explorerOpen = $state(true);
+  let workbenchFiles = $state(defaultWorkbenchFiles());
+  let editorTabs = $state<Panel[]>(["home"]);
+  $effect(() => { if (!editorTabs.includes(panel)) editorTabs = [...editorTabs, panel]; });
+  function closeEditorTab(target: Panel) {
+    const remaining = editorTabs.filter(p => p !== target);
+    editorTabs = remaining.length ? remaining : ["home"];
+    if (panel === target) void setPanel(editorTabs.at(-1)!);
+  }
+  let sessions = $state<ListeningSession[]>([]);
+
+  function storeSessions(next: ListeningSession[]) {
+    try { writeSessions(next); sessions = next; return true; }
+    catch (e) { statusMsg = String(e); return false; }
+  }
+  function saveSession(name: string, replaceId?: string) {
+    try {
+      const session = sessionFromState(name, playerCtl.getSnapshot());
+      if (replaceId) session.id = replaceId;
+      if (storeSessions([session, ...sessions.filter(s => s.id !== session.id)])) statusMsg = `Saved session “${session.name}”`;
+    } catch (e) { statusMsg = String(e); }
+  }
+  async function resumeSession(session: ListeningSession) {
+    try {
+      statusMsg = `Resuming “${session.name}”…`;
+      await setPanel("queue");
+      await playerCtl.restoreSession(session);
+      statusMsg = `Resumed “${session.name}”`;
+    } catch (e) { statusMsg = String(e); }
+  }
+  function renameSession(id: string, name: string) {
+    if (!name.trim()) { statusMsg = "Session name cannot be empty."; sessions = [...sessions]; return; }
+    if (storeSessions(sessions.map(s => s.id === id ? { ...s, name: name.trim().slice(0, 80) } : s))) statusMsg = "Session renamed";
+  }
+  const paletteCommands = $derived.by((): PaletteCommand[] => [
+    ...(["home", "explore", "library", "queue", "settings", "lastfm"] as Panel[]).map(target => ({ id: `nav-${target}`, label: `Go to ${viewLabels[target]}`, detail: "Navigation", run: () => setPanel(target) })),
+    { id: "sessions", label: "Saved sessions and queue rules", detail: "Save, resume, and arrange your listening queue", run: () => setPanel("queue") },
+    ...(player.videoDetails ? [
+      { id: "play-pause", label: player.trackState === "Playing" ? "Pause playback" : "Resume playback", run: () => playerCtl.playPause() },
+      { id: "next", label: "Next track", run: () => playerCtl.next() },
+      { id: "previous", label: "Previous track", run: () => playerCtl.previous() },
+      { id: "shuffle", label: `${player.shuffle ? "Disable" : "Enable"} shuffle`, run: () => playerCtl.toggleShuffle() },
+      { id: "repeat", label: "Cycle repeat mode", detail: `Current: ${player.repeat || "off"}`, run: () => playerCtl.toggleRepeat() },
+      { id: "save", label: "Save current listening session", detail: "Open queue to name and save it", run: () => setPanel("queue") },
+    ] : []),
+    { id: "theme", label: `${$codeTheme ? "Disable" : "Enable"} Code theme`, detail: "Appearance", run: () => setCodeTheme(!$codeTheme) },
+    ...audioDevices.map(d => ({ id: `output-${d.id}`, label: `Output: ${d.label}`, detail: d.id === audioDeviceId ? "Current audio output" : "Switch audio output", run: () => switchAudioOutput(d.id, d.label) })),
+    ...sessions.map(s => ({ id: `session-${s.id}`, label: `Resume session: ${s.name}`, detail: `${s.queue.length} tracks · replaces current queue`, run: () => resumeSession(s) })),
+  ]);
+
+  function paletteShortcut(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && $codeTheme && e.key.toLowerCase() === "b") {
+      e.preventDefault(); if (!e.repeat) explorerOpen = !explorerOpen;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "k" || (e.shiftKey && e.key.toLowerCase() === "p"))) {
+      e.preventDefault();
+      if (!e.repeat) paletteOpen = !paletteOpen;
+    }
+  }
   let statusMsg = $state("Ready");
   let lastfm = $state<LastFmStatus>({
     enabled: false,
@@ -83,6 +150,7 @@
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let detail = $state<DetailTarget | null>(null);
   let detailData = $state<BrowseResult | null>(null);
+  const explorerShelves = $derived(panel === "detail" ? detailData?.shelves || [] : panel === "library" ? libraryData?.shelves || [] : panel === "explore" ? exploreData?.shelves || [] : panel === "search" ? searchData?.shelves || [] : panel === "home" ? homeData?.shelves || [] : []);
   let detailFrom = $state<Panel>("home");
   let detailItem = $state<MusicItem | null>(null);
   let likedIds = $state<Set<string>>(new Set());
@@ -101,12 +169,12 @@
 
   const breadcrumb = $derived.by(() => {
     if (panel === "detail" && (detail?.title || detailData?.title)) {
-      return `${detailFrom}/${detail?.title || detailData?.title || "detail"}`;
+      return `${viewLabels[detailFrom].toLowerCase()}/${detail?.title || detailData?.title || "collection"}`;
     }
     if (panel === "search" && searchQuery.trim()) {
       return `search/${searchQuery.trim()}`;
     }
-    return panel;
+    return viewLabels[panel].toLowerCase();
   });
 
   const isSearching = $derived(panel === "search");
@@ -151,6 +219,9 @@
   }
 
   onMount(() => {
+    loadCodeTheme();
+    workbenchFiles = loadWorkbenchFiles();
+    sessions = readSessions();
     const unsubs: Array<() => void> = [];
 
     // GitHub Releases auto-update (no-op for unsigned local builds)
@@ -357,7 +428,7 @@
     panel = next;
     if (next === "search" && searchQuery.trim() && !searchData) void runSearch();
     if (next !== "detail") detailFrom = next;
-    statusMsg = next === "settings" ? "Settings" : `Opened ${next}`;
+    statusMsg = next === "settings" ? "Settings" : `Opened ${viewLabels[next]}`;
     if (next === "settings") {
       void probeAuth();
       void refreshAudioDevices();
@@ -841,6 +912,10 @@
     const select = ev.target as HTMLSelectElement;
     const id = select.value;
     const label = select.selectedOptions[0]?.text || "System default";
+    await switchAudioOutput(id, label);
+  }
+
+  async function switchAudioOutput(id: string, label: string) {
     try {
       statusMsg = `Switching output to ${label}…`;
       await playerCtl.applySinkId(id, label);
@@ -877,16 +952,28 @@
   }
 </script>
 
-<div class="shell">
+<svelte:window onkeydown={paletteShortcut} />
+
+<div class="shell" class:explorer-hidden={!explorerOpen}>
   <header class="app-bar" onmousedown={startDrag}>
     <div class="app-bar__brand">
       <span class="brand-text">ytmd-lite</span>
       <span class="brand-sub">workspace</span>
     </div>
     <div class="app-bar__center">
-      <span class="breadcrumb">{breadcrumb}</span>
+      {#if $codeTheme}
+        <button class="workbench-command-center" onclick={() => paletteOpen = true}><span class="material-symbols-outlined" aria-hidden="true">search</span><span>ytmd-lite — music workspace</span><kbd>Ctrl K</kbd></button>
+      {:else}
+        <span class="breadcrumb">{breadcrumb}</span>
+      {/if}
     </div>
     <div class="app-bar__actions">
+      {#if $codeTheme}
+        <button class="icon-btn" title="Toggle Explorer (Ctrl+B)" aria-label="Toggle Explorer" aria-pressed={explorerOpen} onclick={() => explorerOpen = !explorerOpen}><span class="material-symbols-outlined">dock_to_left</span></button>
+      {/if}
+      <button class="icon-btn" title="Command palette (Ctrl+K)" aria-label="Command palette" onclick={() => paletteOpen = true}>
+        <span class="material-symbols-outlined">terminal</span>
+      </button>
       {#if !engine.signedIn}
         <button
           class="btn-signin"
@@ -914,12 +1001,12 @@
 
   <aside class="rail">
     <button class="rail-btn" class:active={railActive === "home"} title="Home" onclick={() => setPanel("home")}>
-      <span class="material-symbols-outlined">home</span>
+      <span class="material-symbols-outlined">{$codeTheme ? "files" : "home"}</span>
       <span class="rail-label">Home</span>
     </button>
-    <button class="rail-btn" class:active={railActive === "explore"} title="Explore" onclick={() => setPanel("explore")}>
+    <button class="rail-btn" class:active={railActive === "explore"} title="Discover" onclick={() => setPanel("explore")}>
       <span class="material-symbols-outlined">explore</span>
-      <span class="rail-label">Explore</span>
+      <span class="rail-label">Discover</span>
     </button>
     <button class="rail-btn" class:active={railActive === "library"} title="Library" onclick={() => setPanel("library")}>
       <span class="material-symbols-outlined">library_music</span>
@@ -943,7 +1030,24 @@
     </button>
   </aside>
 
+  {#if $codeTheme && explorerOpen}
+    <WorkbenchExplorer {panel} files={workbenchFiles} shelves={explorerShelves} queue={player.queue || []} {sessions} onnav={setPanel} onopen={openItem} onresume={resumeSession} />
+  {/if}
+
   <main class="content">
+    {#if $codeTheme}
+      <div class="workbench-tabs" aria-label="Open views">
+        {#each editorTabs as target (target)}
+          <div class="workbench-tab" class:active={panel === target}>
+            <button class="workbench-tab-open" aria-current={panel === target ? "page" : undefined} onclick={() => setPanel(target)}><span class="file-symbol" aria-hidden="true">{workbenchFiles[target].symbol}</span>{workbenchFilename(workbenchFiles, target, detailData?.title || undefined)}</button>
+            <button class="workbench-tab-close" title={`Close ${workbenchFilename(workbenchFiles, target, detailData?.title || undefined)}`} aria-label={`Close ${viewLabels[target].toLowerCase()} tab`} onclick={() => closeEditorTab(target)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.25" /></svg></button>
+          </div>
+        {/each}
+      </div>
+      <div class="workbench-breadcrumbs">
+        <button onclick={() => setPanel("home")}>music</button><span aria-hidden="true">›</span><span>{breadcrumb}</span><span aria-hidden="true">›</span><span class="file-symbol" aria-hidden="true">{workbenchFiles[panel].symbol}</span><span>{workbenchFilename(workbenchFiles, panel, detailData?.title || undefined)}</span>
+      </div>
+    {/if}
     {#if !engine.signedIn && (panel === "home" || panel === "explore" || panel === "library" || isSearching)}
       <div class="auth-banner">
         <span class="material-symbols-outlined">login</span>
@@ -1219,7 +1323,7 @@
           </div>
         {:else if panel !== "home"}
           <div class="page-head">
-            <h1 class="page-title">{panel}</h1>
+            <h1 class="page-title">{viewLabels[panel]}</h1>
             <button class="icon-btn" title="Refresh" onclick={() => refreshPanel(panel)} disabled={loading}>
               <span class="material-symbols-outlined">refresh</span>
             </button>
@@ -1235,6 +1339,9 @@
 
         <div class="browse-body" class:dimmed={loading}>
         {#if panel === "queue"}
+          <QueueWorkspace {player} {sessions} onsave={saveSession} onresume={resumeSession} onrename={renameSession}
+            ondelete={(id) => { if (storeSessions(sessions.filter(s => s.id !== id))) statusMsg = "Session deleted"; }}
+            onstatus={(message) => statusMsg = message} />
           <div class="queue-list">
             {#if !(player.queue && player.queue.length)}
               <p class="muted">Queue is empty — play something from Home.</p>
@@ -1371,6 +1478,13 @@
 
         <section class="settings-block">
           <h2 class="settings-label">Appearance</h2>
+          <label class="code-theme-setting">
+            <span>
+              <strong>Code theme</strong>
+              <span class="muted" id="code-theme-description">Browse music as a file tree, with compact artwork and your selected accent color. All your usual controls stay available.</span>
+            </span>
+            <input type="checkbox" role="switch" aria-describedby="code-theme-description" checked={$codeTheme} onchange={(e) => setCodeTheme(e.currentTarget.checked)} />
+          </label>
           <p class="muted" style="margin: 0 0 10px">
             Accent color for buttons, highlights, and the playbar. Accepts a picker, hex, RGB, or CMYK.
           </p>
@@ -1436,6 +1550,10 @@
     onartist={openArtist}
   />
 
+  <CommandPalette open={paletteOpen} commands={paletteCommands} onclose={() => paletteOpen = false}
+    onitem={(item, action) => action === "play" ? playFromUi(item) : action === "queue" ? queueItem(item) : openItem(item)}
+    onerror={(message) => statusMsg = message} />
+
   <ContextMenu
     open={ctx.open}
     x={ctx.x}
@@ -1446,8 +1564,10 @@
   />
 
   <footer class="status">
+    {#if $codeTheme}<span class="workbench-status-mode" aria-label="Code theme"><span class="material-symbols-outlined" aria-hidden="true">code</span></span>{/if}
     <span>{statusMsg}</span>
     <span class="spacer"></span>
+    {#if $codeTheme && player.queue?.length}<span class="workbench-status-track">Track {(player.queueIndex ?? 0) + 1} of {player.queue.length}</span>{/if}
     <span class="muted">{engine.signedIn ? "signed in" : "signed out"} · API {engine.ready ? "ready" : "…"}</span>
   </footer>
 </div>

@@ -1,12 +1,15 @@
 """Exercise playback routes without starting backend background services."""
 import ast
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from flask import Flask, Response, jsonify, request
+sys.path.insert(0, str(Path("python-backend").resolve()))
+from audio_proxy import AudioProxyError
 
 
 class PlaybackBackendTests(unittest.TestCase):
@@ -20,7 +23,8 @@ class PlaybackBackendTests(unittest.TestCase):
                        _pot_opts=lambda: {"extractor_args": {"youtube": {"player_client": ["web_music"]}}},
                        _AUDIO_FMT="audio", _STREAM_ATTEMPTS=[("audio", None, True)] * 9,
                        _ydl_extract_url=Mock(), _stream_url_from_info=lambda info: info.get("url"),
-                       _logging=logging.getLogger(__name__), _stream_resolver=self.resolver)
+                       _logging=logging.getLogger(__name__), _stream_resolver=self.resolver,
+                       AudioStream=Mock(), AudioProxyError=AudioProxyError)
         tree = ast.parse(Path("python-backend/server.py").read_text(encoding="utf-8"))
         names = {"_extract_playback_stream", "audio_stream", "audio_stream_warm", "stream_url",
                  "_is_hard_error", "_is_unavailable"}
@@ -56,19 +60,22 @@ class PlaybackBackendTests(unittest.TestCase):
 
     def test_expired_url_retries_once_preserving_range_and_closing_connections(self):
         self.resolver.resolve.side_effect = [{"url": "expired"}, {"url": "fresh"}]
-        old = Mock(status_code=403)
-        upstream = Mock(status_code=206, headers={"Content-Range": "bytes 0-2/3", "Content-Length": "3"})
-        upstream.iter_content.return_value = iter([b"abc"])
-        with patch("requests.get", side_effect=[old, upstream]) as get:
-            response = self.http.get("/audio-stream/song", headers={"Range": "bytes=0-2"})
-            self.assertEqual(response.status_code, 206)
-            self.assertEqual(response.data, b"abc")
-            response.close()
+        upstream = Mock(status=206, headers={"Content-Range": "bytes 0-2/3", "Content-Length": "3"})
+        upstream.chunks.return_value = iter([b"abc"])
+        self.ns["AudioStream"].side_effect = [AudioProxyError("expired", 403), upstream]
+        response = self.http.get("/audio-stream/song", headers={"Range": "bytes=0-2"})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.data, b"abc")
+        response.close()
         self.resolver.invalidate.assert_called_once_with(("account", "song"))
-        old.close.assert_called_once()
         self.assertTrue(upstream.close.called)
-        self.assertEqual(get.call_args.kwargs["headers"]["Range"], "bytes=0-2")
-        upstream.iter_content.assert_called_once_with(chunk_size=16384)
+        self.ns["AudioStream"].assert_called_with("fresh", "bytes=0-2")
+
+    def test_recovery_invalidates_the_cached_url(self):
+        self.resolver.resolve.return_value = {"url": "fresh"}
+        response = self.http.get("/audio-stream/song/warm?refresh=1")
+        self.assertTrue(response.json["ok"])
+        self.resolver.invalidate.assert_called_once_with(("account", "song"))
 
 
 if __name__ == "__main__":

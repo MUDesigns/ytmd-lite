@@ -24,6 +24,7 @@
       "lastfm.secrets.json",
       "../python-backend/server.py",
       "../python-backend/stream_resolver.py",
+      "../python-backend/audio_proxy.py",
       "../python-backend/requirements.txt",
       "resources/potgen/server/**/*",
       "resources/playback-runtime.json",

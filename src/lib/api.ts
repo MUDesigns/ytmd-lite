@@ -204,6 +204,8 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
     color: typeof raw.color === "string" ? raw.color : undefined,
     artistBrowseId,
     artistLinks: artistLinks.length ? artistLinks : undefined,
+    album: typeof raw.album === "string" ? raw.album : undefined,
+    albumId: typeof raw.albumBrowseId === "string" ? raw.albumBrowseId : undefined,
   };
 }
 
@@ -216,6 +218,7 @@ function mapTrack(t: Record<string, unknown>): MusicItem {
     artistBrowseId: t.artistBrowseId,
     artistLinks: t.artistLinks,
     album: t.album,
+    albumBrowseId: t.albumBrowseId,
     thumbnail: t.thumbnail,
   });
 }
@@ -529,23 +532,30 @@ export async function browseDetail(opts: {
       channelId?: string;
     }>(`/artist/${encodeURIComponent(bid)}`);
     const tracks = (data.tracks || []).map(mapTrack);
-    const albums = [...(data.albums || []), ...(data.singles || [])].map((a) =>
-      mapItem({ ...a, type: "album" }),
-    );
+    const releases: Record<string, MusicItem[]> = { albums: [], eps: [], singles: [], other: [] };
+    for (const [items, fallback] of [[data.albums || [], "albums"], [data.singles || [], "other"]] as const) {
+      for (const release of items) {
+        const label = String(release.releaseType || release.type || "").trim().toLowerCase();
+        const group = label === "ep" ? "eps" : label === "single" ? "singles" : label === "album" ? "albums" : fallback;
+        releases[group].push(mapItem({ ...release, type: "album" }));
+      }
+    }
     const shelves: MusicItem[] = [];
-    if (albums.length) {
-      shelves.push({
-        type: "shelf",
-        id: "artist-albums",
-        title: "Albums & singles",
-        thumbnails: [],
-        items: albums,
-      });
+    for (const [group, title] of [["albums", "Albums"], ["eps", "EPs"], ["singles", "Singles"], ["other", "Singles & EPs"]]) {
+      if (releases[group].length) {
+        shelves.push({
+          type: "shelf",
+          id: `artist-${group}`,
+          title,
+          thumbnails: [],
+          items: releases[group],
+        });
+      }
     }
     const cover =
       pickThumbUrl(data as Record<string, unknown>) ||
       tracks.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
-      albums.find((a) => a.thumbnails?.[0])?.thumbnails?.[0] ||
+      shelves.flatMap((s) => s.items || []).find((a) => a.thumbnails?.[0])?.thumbnails?.[0] ||
       "";
     const listeners = String(data.monthlyListeners || "").trim();
     const subs = String(data.subscribers || "").trim();
@@ -577,7 +587,7 @@ export async function browseDetail(opts: {
       artistBrowseId?: string;
       artistLinks?: unknown;
     }>(`/album/${encodeURIComponent(bid)}`);
-    const items = (data.tracks || []).map(mapTrack);
+    const items = (data.tracks || []).map(t => mapTrack({ ...t, album: t.album || data.title || opts.title, albumBrowseId: t.albumBrowseId || bid }));
     const cover =
       pickThumbUrl(data as Record<string, unknown>) ||
       items.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||

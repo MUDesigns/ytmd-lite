@@ -3,6 +3,7 @@
   import { thumb } from "$lib/api";
   import * as playerCtl from "$lib/player";
   import ArtistLinks from "./ArtistLinks.svelte";
+  import { codeTheme } from "$lib/theme";
 
   let {
     player,
@@ -18,6 +19,7 @@
 
   const playing = $derived(player.trackState === "Playing");
   const buffering = $derived(player.trackState === "Buffering");
+  const failed = $derived(player.trackState === "Error");
   const title = $derived(player.videoDetails?.title ?? "idle");
   const artist = $derived(player.videoDetails?.author || "—");
   const artistLinks = $derived(
@@ -33,9 +35,9 @@
   const art = $derived(thumb(player.videoDetails));
   const volume = $derived(player.volume ?? 100);
   const stateTag = $derived(
-    buffering ? "buf" : playing ? "run" : player.videoDetails ? "stop" : "nil",
+    failed ? "error" : buffering ? "buf" : playing ? "run" : player.videoDetails ? "stop" : "nil",
   );
-  const cmd = $derived(buffering ? "buffer" : playing ? "play" : "pause");
+  const cmd = $derived(failed ? "retry" : buffering ? "buffer" : playing ? "play" : "pause");
 
   let scrubbing = $state(false);
   let scrubPct = $state(0);
@@ -71,11 +73,13 @@
 <footer class="term" class:buffering>
   <div class="term-chrome">
     <div class="tabs">
-      <span class="tab active">PLAYBACK</span>
+      <span class="tab active">{$codeTheme ? "TERMINAL · PLAYBACK" : "PLAYBACK"}</span>
     </div>
     <div class="chrome-meta">
       <span class="pill" data-state={stateTag}>{stateTag}</span>
-      {#if buffering}
+      {#if failed}
+        <span role="status" class="buf-msg">{player.playbackError || "Audio stream interrupted"}</span>
+      {:else if buffering}
         <span class="buf-msg">resolving stream…</span>
       {:else}
         <span class="path">ytmd://playback</span>
