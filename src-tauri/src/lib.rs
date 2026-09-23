@@ -54,6 +54,8 @@ pub fn run() {
         })
         .manage(server)
         .invoke_handler(tauri::generate_handler![
+            server::prepare_app_update,
+            server::restore_backend_after_update,
             commands::get_lastfm_status,
             commands::get_player_snapshot,
             commands::set_lastfm_enabled,
@@ -275,7 +277,9 @@ pub fn run() {
                     state.discord.shutdown();
                 }
                 if let Some(sp) = app.try_state::<ServerProcess>() {
-                    server::stop_server(&sp);
+                    if let Err(e) = server::stop_server(&sp) {
+                        log::warn!("Backend shutdown failed: {e}");
+                    }
                 }
             }
         });

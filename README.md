@@ -17,7 +17,7 @@ Lightweight YouTube Music desktop client built with **Tauri 2** + **Svelte 5**. 
 
 ### Develop
 
-- Node 20+
+- Node 22+
 - Rust (stable)
 - Python 3.11+ (for the local API)
 - Windows: WebView2 · macOS: WKWebView · Linux: WebKitGTK
@@ -39,7 +39,25 @@ python-backend\.venv\Scripts\activate
 # macOS/Linux:
 # source python-backend/.venv/bin/activate
 pip install -r python-backend/requirements.txt
+npm run playback:setup
 ```
+
+Playback setup requires Node 22 or newer. It builds the pinned bgutil token
+generator and stages it with Node under `src-tauri/resources`; restart the app's
+backend after setup. Release builds run this step automatically. The generator
+and Python provider versions must match (currently 1.3.1).
+
+The player resolves the next queued song while the current song plays. Extraction
+requests share a cache and in-progress work, with at most two extractions active.
+Playback returns a resolution timeout after 25 seconds; an underlying extractor
+may finish later, but retains its slot so repeated skips cannot create unlimited
+background work. Each network operation has a shorter timeout, and new fallback
+attempts stop after a 20-second budget. Browser-cookie scans are excluded from playback.
+
+For latency diagnostics, frontend console entries tagged `[playback timing]`
+separate URL resolution from audio startup. Backend `/debug/info` includes
+`potAvailable`, `potServerRunning`, and `[stream timing]` logs for extraction and
+first proxy bytes. Preparing a URL does not download the whole song.
 
 ### Last.fm (optional for scrobbling)
 
@@ -83,6 +101,11 @@ Release builds query:
 `https://github.com/MUDesigns/ytmd-lite/releases/latest/download/latest.json`
 
 On launch, a newer version is downloaded, verified with the embedded public key, installed, and the app relaunches.
+
+Before installation, the app waits for its playback backend and token helper to
+stop. Windows installers also stop helpers from the target installation directory,
+so updates from older releases can replace files left locked by orphaned processes.
+If backend shutdown fails, installation is deferred. Development builds skip updates.
 
 ## Layout
 

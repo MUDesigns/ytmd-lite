@@ -13,7 +13,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "icon": "python scripts/make-icon.py && npx tauri icon app-icon.png",
-    "backend:build": "python-backend\\\\build_backend.bat"
+    "backend:build": "python-backend\\\\build_backend.bat",
+    "playback:setup": "python scripts/setup-playback.py"
   },
   "license": "AGPL-3.0-only",
   "dependencies": {

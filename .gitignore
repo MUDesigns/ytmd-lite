@@ -12,6 +12,10 @@ src-tauri/target
 src-tauri/gen
 src-tauri/binaries
 src-tauri/resources/*.exe
+src-tauri/resources/node
+src-tauri/resources/potgen/
+src-tauri/resources/playback-runtime.json
+src-tauri/resources/NODE-LICENSE
 python-backend/.venv
 python-backend/build_tmp
 __pycache__/

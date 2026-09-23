@@ -23,7 +23,12 @@
     "resources": [
       "lastfm.secrets.json",
       "../python-backend/server.py",
-      "../python-backend/requirements.txt"
+      "../python-backend/stream_resolver.py",
+      "../python-backend/requirements.txt",
+      "resources/potgen/server/**/*",
+      "resources/playback-runtime.json",
+      "resources/NODE-LICENSE",
+      "resources/node.exe"
     ],
     "icon": [
       "icons/32x32.png",
@@ -34,6 +39,7 @@
     ],
     "windows": {
       "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh",
         "installMode": "perMachine"
       }
     }

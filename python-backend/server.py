@@ -9,6 +9,21 @@ from flask_cors import CORS
 from ytmusicapi import YTMusic
 import sys, os, json, glob, threading, time, requests, sqlite3, uuid, collections
 
+# Packaging smoke test: exit before profiles, background jobs, or ports are touched.
+if __name__ == "__main__" and "--check-playback" in sys.argv:
+    import yt_dlp
+    from yt_dlp.extractor.youtube.pot._registry import _pot_providers
+    from yt_dlp_ejs.yt import solver
+    from stream_resolver import StreamResolver
+    with yt_dlp.YoutubeDL({"quiet": True}):
+        if not solver.core() or not solver.lib():
+            raise RuntimeError("Bundled JavaScript challenge solver missing")
+        providers = list(_pot_providers.value)
+        if "BgUtilHTTP" not in providers or "BgUtilScriptNode" not in providers:
+            raise RuntimeError(f"Bundled token providers missing: {providers}")
+        print(json.dumps({"playbackDependencies": "ok", "providers": providers}))
+    sys.exit(0)
+
 app = Flask(__name__)
 CORS(app, origins=[
     "http://localhost:1420",    # YTMD Lite Tauri dev
@@ -2325,6 +2340,7 @@ def shutdown():
                     _pot_proc.wait(timeout=3)
                 except Exception:
                     _pot_proc.kill()
+                    _pot_proc.wait(timeout=3)
         except Exception:
             pass
         time.sleep(0.2)
@@ -2729,7 +2745,7 @@ def _node_major(node_path):
     import subprocess, re
     try:
         out = subprocess.run([node_path, "--version"], capture_output=True, text=True,
-                             timeout=5).stdout.strip()
+                             timeout=5, **({"creationflags": 0x08000000} if sys.platform == "win32" else {})).stdout.strip()
         m = re.match(r"v?(\d+)", out)
         return int(m.group(1)) if m else 0
     except Exception:
@@ -2745,6 +2761,7 @@ def _find_node22():
     cands = [os.environ.get("KODAMA_NODE")]
     for d in (exe_dir, parent, os.path.join(parent, "Resources"), os.path.join(exe_dir, "..", "Resources")):
         cands.append(os.path.join(d, node_name))
+    cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src-tauri", "resources", node_name))
     cands.append(shutil.which("node"))
     for c in cands:
         if c and os.path.isfile(c) and _node_major(c) >= _MIN_NODE_MAJOR:
@@ -2760,7 +2777,8 @@ def _find_pot_server_dir():
     roots = [exe_dir, parent, os.path.join(parent, "Resources"),
              os.path.join(exe_dir, "..", "Resources"), _base_dir,
              os.path.dirname(os.path.abspath(__file__))]
-    bases = [os.environ.get("KODAMA_POT_SERVER")]
+    bases = [os.environ.get("KODAMA_POT_SERVER"),
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src-tauri", "resources", "potgen", "server")]
     for b in roots:
         bases.append(os.path.join(b, "potgen", "server"))
         bases.append(os.path.join(b, "resources", "potgen", "server"))
@@ -2815,94 +2833,55 @@ def _start_pot_server():
 
 _start_pot_server()
 
+def _extract_playback_stream(key):
+    """Keep playback retries short; browser-cookie scans are not a playback path."""
+    global _LAST_STREAM_ERROR
+    profile, video_id = key
+    started = time.monotonic()
+    attempts = list(_STREAM_ATTEMPTS)
+    if _POT_AVAILABLE:
+        attempts.insert(0, (_AUDIO_FMT, _pot_opts(), False))
+    last_error = "No playable audio format found"
+    for fmt, extra, no_auth in attempts:
+        if profile != _current_profile:
+            return {"error": "Account changed while resolving stream"}
+        if time.monotonic() - started >= 20:
+            last_error = "Timed out resolving audio stream"
+            break
+        opts = {"socket_timeout": 6, "retries": 0, "extractor_retries": 0,
+                "fragment_retries": 0, "noplaylist": True}
+        if _NODE22:
+            opts["js_runtimes"] = {"node": {"path": _NODE22}}
+        opts.update(extra or {})
+        attempt_started = time.monotonic()
+        try:
+            info = _ydl_extract_url(video_id, fmt, extra_opts=opts,
+                                    skip_auth=no_auth, use_ytm=not no_auth)
+            url = _stream_url_from_info(info)
+            if url:
+                elapsed = round((time.monotonic() - started) * 1000)
+                _logging.info("[stream timing] %s resolved in %dms via %s auth=%s",
+                              video_id, elapsed, opts.get("extractor_args"), not no_auth)
+                return {"url": url, "resolve_ms": elapsed}
+        except Exception as exc:
+            last_error = str(exc)
+            _logging.warning("[stream] %s attempt failed after %.1fs: %s",
+                             video_id, time.monotonic() - attempt_started, last_error)
+            if _is_hard_error(last_error):
+                break
+    _LAST_STREAM_ERROR = {"videoId": video_id, "error": last_error[:400], "at": int(time.time())}
+    return {"error": last_error, "premium_only": _is_hard_error(last_error),
+            "unavailable": _is_unavailable(last_error)}
+
+
+from stream_resolver import StreamResolver
+_stream_resolver = StreamResolver(_extract_playback_stream)
+
+
 @app.route("/stream/<video_id>")
 def stream_url(video_id):
-    global _LAST_STREAM_ERROR
-    last_err = None
-    _t_total = time.time()
-
-    # ── Tier 0: authenticated web_music + GVS PO token (the real fix) ─────────
-    # Bypasses BOTH the PO-token wall (Premium-only tracks) and the anonymous
-    # mobile-client "Sign in to confirm you're not a bot" check, because it runs
-    # as the logged-in web client with a freshly minted PO token. Only active
-    # when node>=22 + the bgutil generator are present (see _POT_AVAILABLE);
-    # otherwise we fall straight through to the legacy tiers below.
-    if _POT_AVAILABLE:
-        _t = time.time()
-        try:
-            info = _ydl_extract_url(video_id, _AUDIO_FMT, extra_opts=_pot_opts(), skip_auth=False)
-            url = _stream_url_from_info(info)
-            if url:
-                _logging.info(f"[stream] {video_id} OK via web_music+PO token in {time.time()-_t:.1f}s (total {time.time()-_t_total:.1f}s)")
-                return jsonify({"url": url})
-        except Exception as e:
-            last_err = e
-            _logging.warning(f"[stream] {video_id} web_music+PO token FAILED in {time.time()-_t:.1f}s: {e}")
-
-    # ── Tier 1: app session (authenticated web + anonymous mobile/web) ───────
-    # Tried FIRST because it's the fast common path: app cookies are kept fresh by the session
-    # keeper, and the anonymous mobile clients resolve most tracks with no cookies at all. The
-    # browser-cookie tier below is slow and usually fails on Windows (locked DB / DPAPI), so it
-    # only runs as a last-ditch source of fresh Premium cookies — not up front on every song.
-    for fmt, extra, no_auth in _STREAM_ATTEMPTS:
-        _t = time.time()
-        try:
-            info = _ydl_extract_url(video_id, fmt, extra_opts=extra, skip_auth=no_auth)
-            url = _stream_url_from_info(info)
-            if url:
-                _logging.info(f"[stream] {video_id} OK via attempt {extra} no_auth={no_auth} in {time.time()-_t:.1f}s (total {time.time()-_t_total:.1f}s)")
-                return jsonify({"url": url})
-        except Exception as e:
-            last_err = e
-            _logging.warning(f"[stream] {video_id} attempt {extra} no_auth={no_auth} FAILED in {time.time()-_t:.1f}s: {e}")
-            if _is_hard_error(str(e)):
-                break
-
-    # ── Tier 2: browser cookies — last-ditch fresh/Premium cookies (slow, often fails). ───────
-    for browser_opts in _browser_cookie_opts():
-        browser = browser_opts["cookiesfrombrowser"][0]
-        _t = time.time()
-        try:
-            info = _ydl_extract_url(video_id, _AUDIO_FMT, extra_opts=browser_opts, skip_auth=True)
-            url = _stream_url_from_info(info)
-            if url:
-                _logging.info(f"[stream] {video_id} OK via {browser} browser cookies in {time.time()-_t:.1f}s (total {time.time()-_t_total:.1f}s)")
-                return jsonify({"url": url})
-        except Exception as e:
-            last_err = e
-            _logging.warning(f"[stream] {video_id} browser={browser} FAILED in {time.time()-_t:.1f}s: {e}")
-            if _is_hard_error(str(e)):
-                break
-
-    # ── Tier 3: brute-force — no format selector, any audio format ───────────
-    # Also retries with youtube.com URL for anonymous attempts: youtube.com
-    # has wider format availability and is less restrictive than music.youtube.com
-    # for anonymous/unauthenticated access.
-    _hard_stop = False
-    for no_auth, use_ytm in ((False, True), (True, True), (True, False)):
-        if _hard_stop:
-            break
-        for extra in (None, _WEB_MUSIC_OPTS, _MWEB_OPTS, _ANDROID_OPTS, _IOS_OPTS, _TV_OPTS):
-            if extra in (_ANDROID_OPTS, _IOS_OPTS, _TV_OPTS, _MWEB_OPTS) and not no_auth:
-                continue  # never combine mobile clients with cookies
-            try:
-                url = _ydl_pick_any_audio(video_id, extra_opts=extra, skip_auth=no_auth, use_ytm=use_ytm)
-                if url:
-                    _logging.info(f"[stream] {video_id} recovered via brute-force no_auth={no_auth} ytm={use_ytm}")
-                    return jsonify({"url": url})
-            except Exception as e:
-                last_err = e
-                if _is_hard_error(str(e)) or _is_unavailable(str(e)):
-                    _hard_stop = True
-                    break
-                _logging.warning(f"[stream] {video_id} brute-force no_auth={no_auth} ytm={use_ytm}: {e}")
-
-    err_str = str(last_err) if last_err else "No URL found"
-    premium = "Music Premium" in err_str
-    unavailable = _is_unavailable(err_str)
-    _LAST_STREAM_ERROR = {"videoId": video_id, "error": err_str[:400], "at": int(time.time())}
-    _logging.error(f"[stream] {video_id}: {type(last_err).__name__}: {err_str}")
-    return jsonify({"error": err_str, "premium_only": premium, "unavailable": unavailable}), 500
+    result = _stream_resolver.resolve((_current_profile, video_id))
+    return jsonify(result), 200 if result.get("url") else 503
 
 
 @app.route("/stream-prepare/<video_id>")
@@ -2974,73 +2953,60 @@ def stream_prepare(video_id):
 # downloading it whole first, while keeping playback in the app process (OBS-capturable).
 # The resolved googlevideo URL is cached per video (it's expensive to extract and the Rust
 # source makes several range requests per song).
-_audio_stream_url_cache = {}  # video_id -> (url, expiry_ts)
-
-def _resolve_audio_url(video_id):
-    import requests as req
-    now = time.time()
-    ent = _audio_stream_url_cache.get(video_id)
-    if ent and ent[1] > now:
-        return ent[0]
-    try:
-        d = req.get(f"http://127.0.0.1:9847/stream/{video_id}", timeout=60).json()
-    except Exception:
-        return None
-    if d.get("premium_only"):
-        return "premium_only"
-    url = d.get("url")
-    if url:
-        _audio_stream_url_cache[video_id] = (url, now + 5 * 3600)
-    return url
-
 @app.route("/audio-stream/<video_id>")
 def audio_stream(video_id):
     import requests as req
-    from flask import Response
-    range_header = request.headers.get("Range")
+    key = (_current_profile, video_id)
+    started = time.monotonic()
     up_headers = {"User-Agent": "Mozilla/5.0"}
-    if range_header:
-        up_headers["Range"] = range_header
+    if request.headers.get("Range"):
+        up_headers["Range"] = request.headers["Range"]
 
     upstream = None
     for attempt in range(2):
-        url = _resolve_audio_url(video_id)
-        if url == "premium_only":
-            return jsonify({"premium_only": True}), 403
-        if not url:
-            return jsonify({"error": "no_url"}), 502
+        result = _stream_resolver.resolve(key)
+        if not result.get("url"):
+            return jsonify(result), 403 if result.get("premium_only") else 503
         try:
-            upstream = req.get(url, headers=up_headers, stream=True, timeout=60)
-        except Exception as e:
-            _audio_stream_url_cache.pop(video_id, None)
-            if attempt == 0:
-                continue
-            return jsonify({"error": str(e)}), 502
-        # Expired/blocked signed URL → drop cache and re-resolve once.
+            upstream = req.get(result["url"], headers=up_headers, stream=True, timeout=(6, 15))
+        except req.RequestException:
+            return jsonify({"error": "Audio connection failed; please try again"}), 502
         if upstream.status_code in (403, 410) and attempt == 0:
-            _audio_stream_url_cache.pop(video_id, None)
+            upstream.close()
+            _stream_resolver.invalidate(key)
             continue
         break
 
-    resp_headers = {"Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Range, Accept-Ranges"}
+    resp_headers = {"Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Expose-Headers": "Content-Type, Content-Length, Content-Range, Accept-Ranges"}
     for h in ("Content-Type", "Content-Length", "Content-Range"):
-        v = upstream.headers.get(h)
-        if v:
-            resp_headers[h] = v
+        if upstream.headers.get(h):
+            resp_headers[h] = upstream.headers[h]
     ctype = upstream.headers.get("Content-Type", "audio/mp4")
     def gen():
-        for chunk in upstream.iter_content(chunk_size=65536):
-            if chunk:
-                yield chunk
-    return Response(gen(), status=upstream.status_code, headers=resp_headers, content_type=ctype)
+        first = True
+        try:
+            # Smaller chunks reduce first-byte latency on slower upstreams.
+            for chunk in upstream.iter_content(chunk_size=16384):
+                if chunk:
+                    if first:
+                        _logging.info("[stream timing] %s first proxy bytes in %dms", video_id,
+                                      round((time.monotonic() - started) * 1000))
+                        first = False
+                    yield chunk
+        finally:
+            upstream.close()
+    response = Response(gen(), status=upstream.status_code, headers=resp_headers, content_type=ctype)
+    response.call_on_close(upstream.close)
+    return response
 
 
 @app.route("/audio-stream/<video_id>/warm")
 def audio_stream_warm(video_id):
-    """Resolve + cache the stream URL ahead of time (no byte transfer) so the next play of
-    this song skips the yt-dlp extraction wait. Used to prewarm upcoming queue tracks."""
-    url = _resolve_audio_url(video_id)
-    return jsonify({"ok": bool(url) and url != "premium_only"})
+    """Resolve the upcoming track without transferring audio; share foreground work."""
+    result = _stream_resolver.resolve((_current_profile, video_id))
+    ok = bool(result.get("url"))
+    return jsonify({k: v for k, v in {**result, "ok": ok}.items() if k != "url"}), 200 if ok else 503
 
 
 @app.route("/library/playlists")
@@ -5673,6 +5639,8 @@ def debug_info():
         "ytmusicapi": _pkg_version("ytmusicapi"),
         "flask":      _pkg_version("flask"),
         "node":       node_path,
+        "potAvailable": _POT_AVAILABLE,
+        "potServerRunning": bool(_pot_proc and _pot_proc.poll() is None),
         "profile":    _current_profile or "—",
         "platform":   _platform.system() + " " + _platform.release(),
         "uptime":     uptime_str,

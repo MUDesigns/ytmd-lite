@@ -27,7 +27,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "22"
           cache: npm
 
       - name: Setup Rust
@@ -51,6 +51,8 @@ jobs:
           npm test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tests/installer-shutdown.test.ps1
 
       - name: Set release version
         id: version
@@ -73,6 +75,8 @@ jobs:
           python -m venv python-backend/.venv
           source python-backend/.venv/Scripts/activate
           pip install -r python-backend/requirements.txt pyinstaller
+          python -m unittest discover -s tests -p 'test_*.py'
+          python scripts/setup-playback.py
           mkdir -p src-tauri/binaries
           pyinstaller --noconfirm --onefile \
             --name ytmd-backend-x86_64-pc-windows-msvc \
@@ -86,8 +90,12 @@ jobs:
             --hidden-import=pykakasi \
             --collect-all ytmusicapi \
             --collect-all yt_dlp \
+            --collect-all yt_dlp_ejs \
+            --collect-all yt_dlp_plugins \
+            --copy-metadata bgutil-ytdlp-pot-provider \
             --collect-all pykakasi \
             python-backend/server.py
+          src-tauri/binaries/ytmd-backend-x86_64-pc-windows-msvc.exe --check-playback
           # Ship sidecar next to resources so the installed app can find it
           cp "src-tauri/binaries/${{ matrix.backend_name }}" \
             "src-tauri/binaries/ytmd-backend.exe"

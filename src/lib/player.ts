@@ -22,6 +22,9 @@ let repeatMode: "off" | "one" | "all" = "off";
 /** When shuffle is on, next track picks from remaining unplayed indices. */
 let shuffleBag: number[] = [];
 let likeStatus = "INDIFFERENT";
+let activeLoad: AbortController | null = null;
+let prewarm: { videoId: string; controller: AbortController } | null = null;
+let playbackTiming: { videoId: string; started: number; resolved?: number } | null = null;
 
 function ensureAudio() {
   if (audio) return audio;
@@ -54,7 +57,17 @@ function ensureAudio() {
       audio?.pause();
       return;
     }
+    if (playbackTiming?.resolved !== undefined) {
+      console.info("[playback timing]", {
+        videoId: playbackTiming.videoId,
+        resolveMs: Math.round(playbackTiming.resolved - playbackTiming.started),
+        audioMs: Math.round(performance.now() - playbackTiming.resolved),
+        totalMs: Math.round(performance.now() - playbackTiming.started),
+      });
+      playbackTiming = null;
+    }
     sync("Playing");
+    prepareNext();
   });
   audio.addEventListener("error", () => {
     const code = audio?.error?.code;
@@ -187,36 +200,39 @@ function errMsg(e: unknown): string {
   return String(e);
 }
 
-/** Prefer proxied audio-stream; fall back to direct googlevideo URL from /stream. */
-async function resolveSrc(videoId: string): Promise<string> {
-  try {
-    const warm = await fetch(`${API_BASE}/audio-stream/${encodeURIComponent(videoId)}/warm`);
-    if (warm.ok) {
-      const body = await warm.json().catch(() => ({}));
-      if (!(body && body.ok === false)) {
-        return streamUrl(videoId);
-      }
-    }
-  } catch (e) {
-    throw new Error(errMsg(e));
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/stream/${encodeURIComponent(videoId)}`);
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && typeof data.url === "string" && data.url) {
-      return data.url;
-    }
-    if (data.premium_only) throw new Error("This track requires YouTube Premium");
-    if (data.error) throw new Error(String(data.error));
-  } catch (e) {
-    if (e instanceof Error && !/failed to fetch/i.test(e.message)) throw e;
-  }
-
+/** Resolve once; retrying through another endpoint repeats the same extraction. */
+async function resolveSrc(videoId: string, signal: AbortSignal): Promise<string> {
+  const res = await fetch(`${API_BASE}/audio-stream/${encodeURIComponent(videoId)}/warm`, { signal });
+  const data = await res.json();
+  if (data.premium_only) throw new Error("This track requires YouTube Premium");
+  if (!res.ok || !data.ok) throw new Error(data.error || "Could not resolve audio stream");
   return streamUrl(videoId);
 }
 
-function waitCanPlay(a: HTMLAudioElement, timeoutMs = 45000): Promise<void> {
+function prepareNext() {
+  if (loading || userPaused || !currentItem()) return;
+  let index = queueIndex + 1;
+  if (repeatMode === "one") index = queueIndex;
+  else if (shuffleOn && queue.length > 1) {
+    if (!shuffleBag.length) rebuildShuffleBag(queueIndex);
+    index = shuffleBag[0];
+  } else if (index >= queue.length && repeatMode === "all") index = 0;
+  const videoId = queue[index]?.videoId;
+  if (prewarm?.videoId === videoId) return;
+  prewarm?.controller.abort();
+  prewarm = null;
+  if (!videoId || videoId === currentItem()?.videoId) return;
+  const controller = new AbortController();
+  prewarm = { videoId, controller };
+  const timer = setTimeout(() => controller.abort(), 30000);
+  void resolveSrc(videoId, controller.signal).catch(() => {
+    // Preparation is optional; a foreground request can retry later.
+    if (prewarm?.controller === controller) prewarm = null;
+  }).finally(() => clearTimeout(timer));
+}
+
+function waitCanPlay(a: HTMLAudioElement, signal: AbortSignal, timeoutMs = 20000): Promise<void> {
+  signal.throwIfAborted();
   if (a.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const onReady = () => {
@@ -227,6 +243,10 @@ function waitCanPlay(a: HTMLAudioElement, timeoutMs = 45000): Promise<void> {
       cleanup();
       reject(new Error("Failed to load audio stream"));
     };
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out loading audio stream"));
@@ -235,9 +255,11 @@ function waitCanPlay(a: HTMLAudioElement, timeoutMs = 45000): Promise<void> {
       clearTimeout(timer);
       a.removeEventListener("canplay", onReady);
       a.removeEventListener("error", onErr);
+      signal.removeEventListener("abort", onAbort);
     };
     a.addEventListener("canplay", onReady);
     a.addEventListener("error", onErr);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -298,6 +320,7 @@ export function addToQueue(items: MusicItem | MusicItem[]) {
   } else {
     sync();
   }
+  prepareNext();
   return mapped.length;
 }
 
@@ -313,10 +336,17 @@ export function playNext(items: MusicItem | MusicItem[]) {
   queue = [...queue.slice(0, insertAt), ...mapped, ...queue.slice(insertAt)];
   if (shuffleOn) rebuildShuffleBag(queueIndex);
   sync();
+  prepareNext();
   return mapped.length;
 }
 
 export function clearQueue() {
+  activeLoad?.abort();
+  activeLoad = null;
+  prewarm?.controller.abort();
+  prewarm = null;
+  playbackTiming = null;
+  loading = false;
   userPaused = true;
   stopProgress();
   queue = [];
@@ -327,6 +357,7 @@ export function clearQueue() {
   if (a) {
     a.pause();
     a.removeAttribute("src");
+    a.load();
   }
   sync("Unknown");
 }
@@ -336,12 +367,14 @@ export function toggleShuffle(): boolean {
   if (shuffleOn && queue.length) rebuildShuffleBag(queueIndex >= 0 ? queueIndex : undefined);
   else shuffleBag = [];
   sync();
+  prepareNext();
   return shuffleOn;
 }
 
 export function toggleRepeat(): "off" | "one" | "all" {
   repeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
   sync();
+  prepareNext();
   return repeatMode;
 }
 
@@ -358,43 +391,66 @@ async function loadCurrent(autoplay: boolean) {
   const item = currentItem();
   if (!item) return;
   const a = ensureAudio();
+  activeLoad?.abort();
+  const controller = new AbortController();
+  activeLoad = controller;
+  if (prewarm?.videoId !== item.videoId) prewarm?.controller.abort();
+  prewarm = null;
+  const { signal } = controller;
+  const started = performance.now();
+  playbackTiming = { videoId: item.videoId, started };
+  // Stop the previous stream and any pending play promise immediately.
+  a.pause();
+  a.removeAttribute("src");
+  a.load();
   userPaused = false;
   loading = true;
   sync("Buffering");
   startProgress();
 
+  const resolveTimer = setTimeout(() => controller.abort(new Error("Timed out resolving audio stream")), 30000);
   try {
-    const src = await resolveSrc(item.videoId);
-    if (userPaused) {
-      sync("Paused");
-      return;
-    }
+    const src = await resolveSrc(item.videoId, signal);
+    clearTimeout(resolveTimer);
+    signal.throwIfAborted();
+    playbackTiming = { videoId: item.videoId, started, resolved: performance.now() };
     a.src = src;
     a.volume = volume / 100;
     await applySinkId(preferredSinkId);
+    signal.throwIfAborted();
     a.load();
     sync("Buffering");
 
     if (autoplay) {
-      await waitCanPlay(a);
+      await waitCanPlay(a, signal);
       if (userPaused) {
         sync("Paused");
         return;
       }
       loading = false;
       await a.play();
+      signal.throwIfAborted();
       sync("Playing");
+      prepareNext();
     } else {
       loading = false;
       sync("Paused");
     }
   } catch (e) {
+    if (activeLoad !== controller) return;
+    // A newer selection aborts the old request; only this load owns its state.
     loading = false;
     userPaused = true;
+    playbackTiming = null;
+    a.pause();
     sync("Paused");
     throw new Error(errMsg(e));
   } finally {
-    loading = false;
+    clearTimeout(resolveTimer);
+    if (activeLoad === controller) {
+      loading = false;
+      activeLoad = null;
+    }
   }
 }
 
@@ -408,8 +464,15 @@ export async function playQueueIndex(index: number) {
 export async function playPause() {
   const a = ensureAudio();
   if (!currentItem()) return;
+  if (loading) {
+    userPaused = !userPaused;
+    if (userPaused) a.pause();
+    sync(userPaused ? "Paused" : "Buffering");
+    return;
+  }
 
   if (a.paused || userPaused) {
+    if (!a.getAttribute("src") || a.error) return loadCurrent(true);
     userPaused = false;
     try {
       await a.play();
@@ -540,7 +603,12 @@ export async function handleMediaCommand(command: string) {
   if (command === "playPause" || command === "play" || command === "pause") {
     if (command === "play") {
       userPaused = false;
+      if (loading) {
+        sync("Buffering");
+        return;
+      }
       const a = ensureAudio();
+      if (!a.getAttribute("src") || a.error) return loadCurrent(true);
       await a.play();
       sync("Playing");
       return;
