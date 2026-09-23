@@ -10,11 +10,13 @@
     onqueue,
     onlike,
     onartist,
+    onmini,
   }: {
     player: PlayerState;
     onqueue?: () => void;
     onlike?: () => void;
     onartist?: (artist: ArtistLink) => void;
+    onmini?: () => void;
   } = $props();
 
   const playing = $derived(player.trackState === "Playing");
@@ -85,6 +87,9 @@
         <span class="path">ytmd://playback</span>
       {/if}
     </div>
+    <button class="term-btn ghost" title="Open mini player" aria-label="Open mini player" onclick={() => onmini?.()}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v8h-2V6H5v12h6v2H3V4zm10 10h9v7h-9v-7zm2 2v3h5v-3h-5z" /></svg>
+    </button>
     <button class="term-btn ghost" title="Queue" onclick={() => onqueue?.()}>
       <svg viewBox="0 0 24 24" aria-hidden="true"
         ><path

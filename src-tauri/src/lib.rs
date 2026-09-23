@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod discord;
 mod lastfm;
+mod mini_player;
 mod player_state;
 mod rpc;
 mod server;
@@ -54,6 +55,9 @@ pub fn run() {
         })
         .manage(server)
         .invoke_handler(tauri::generate_handler![
+            mini_player::open_mini_player,
+            mini_player::close_mini_player,
+            mini_player::pin_mini_player,
             server::prepare_app_update,
             server::restore_backend_after_update,
             commands::get_lastfm_status,

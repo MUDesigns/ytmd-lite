@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { emitTo, listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import {
     browseDetail,
@@ -45,9 +45,18 @@
   import { defaultWorkbenchFiles, loadWorkbenchFiles, workbenchFilename, viewLabels } from "$lib/workbench";
   import { readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
   import type { PaletteCommand } from "$lib/commands";
+  import { miniPlayerUpdate } from "$lib/mini-player";
 
   let panel = $state<Panel>("home");
   let paletteOpen = $state(false);
+  let miniConnected = false;
+  async function openMiniPlayer() {
+    try { await invoke("open_mini_player"); }
+    catch (e) { statusMsg = `Could not open mini player: ${String(e)}`; }
+  }
+  function syncMiniPlayer(state = playerCtl.getSnapshot()) {
+    if (miniConnected) void emitTo("mini-player", "mini-player-state", miniPlayerUpdate(state, accentColor)).catch(() => {});
+  }
   let explorerOpen = $state(true);
   let workbenchFiles = $state(defaultWorkbenchFiles());
   let editorTabs = $state<Panel[]>(["home"]);
@@ -85,6 +94,7 @@
   const paletteCommands = $derived.by((): PaletteCommand[] => [
     ...(["home", "explore", "library", "queue", "settings", "lastfm"] as Panel[]).map(target => ({ id: `nav-${target}`, label: `Go to ${viewLabels[target]}`, detail: "Navigation", run: () => setPanel(target) })),
     { id: "sessions", label: "Saved sessions and queue rules", detail: "Save, resume, and arrange your listening queue", run: () => setPanel("queue") },
+    { id: "mini-player", label: "Open mini player", detail: "Compact controls in the corner of this monitor", run: openMiniPlayer },
     ...(player.videoDetails ? [
       { id: "play-pause", label: player.trackState === "Playing" ? "Pause playback" : "Resume playback", run: () => playerCtl.playPause() },
       { id: "next", label: "Next track", run: () => playerCtl.next() },
@@ -229,6 +239,7 @@
 
     unsubs.push(playerCtl.subscribe((s) => {
       player = s;
+      syncMiniPlayer(s);
       if (s.videoDetails?.id) {
         const liked = likedIds.has(s.videoDetails.id);
         if ((s.likeStatus === "LIKE") !== liked) {
@@ -245,6 +256,8 @@
     }));
 
     (async () => {
+      unsubs.push(await listen("mini-player-ready", () => { miniConnected = true; syncMiniPlayer(); }));
+      unsubs.push(await listen("mini-player-closed", () => { miniConnected = false; }));
       try {
         lastfm = await invoke<LastFmStatus>("get_lastfm_status");
         discordRpc = await invoke<DiscordRpcStatus>("get_discord_rpc_status");
@@ -320,7 +333,7 @@
       );
       unsubs.push(
         await listen<string>("media-command", (e) => {
-          void playerCtl.handleMediaCommand(e.payload);
+          void playerCtl.handleMediaCommand(e.payload).catch((error) => statusMsg = String(error));
         }),
       );
       unsubs.push(
@@ -1545,6 +1558,7 @@
 
   <PlayerDock
     {player}
+    onmini={openMiniPlayer}
     onqueue={() => setPanel("queue")}
     onlike={toggleLikeCurrent}
     onartist={openArtist}

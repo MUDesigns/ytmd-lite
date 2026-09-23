@@ -11,6 +11,13 @@ test("tag builds embed the exact requested stable version", () => {
   assert.equal(releaseVersion("0.2.1", "7", "v0.3.0"), "0.3.0");
   assert.throws(() => releaseVersion("0.2.1", "7", "v0.3.0-beta"));
 });
+
+test("explicit main version bumps publish exactly that version, including reruns", () => {
+  assert.equal(releaseVersion("0.3.1", "10", undefined, "0.2.1"), "0.3.1");
+  assert.equal(releaseVersion("0.3.1", "11", undefined, "0.2.1"), "0.3.1");
+  assert.equal(releaseVersion("0.3.1", "12", undefined, "0.3.1"), "0.3.13");
+  assert.throws(() => releaseVersion("256.0.0", "10", undefined, "0.2.1"));
+});
 test("invalid versions and MSI overflow stop the release", () => {
   assert.throws(() => releaseVersion("0.2.1", "0"));
   assert.throws(() => releaseVersion("0.2.1", "65535"));

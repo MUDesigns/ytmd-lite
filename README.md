@@ -90,7 +90,7 @@ Signed updater artifacts require `TAURI_SIGNING_PRIVATE_KEY` (and optional passw
 
 Every push to `main` builds signed Windows installers with the bundled Python backend and publishes an official [GitHub release](https://github.com/MUDesigns/ytmd-lite/releases). The app auto-updater discovers these releases through `latest.json`.
 
-The [release workflow](https://github.com/MUDesigns/ytmd-lite/actions/workflows/release.yml) adds its run number to the patch component of the version in `src-tauri/tauri.conf.json` (for example, base `0.2.1` plus run `6` produces `0.2.7`). This gives each main build a newer embedded app version without committing version bumps. Keep the base version increasing when changing it. A `vX.Y.Z` tag builds that exact stable version; manual runs use the same automatic numbering as main pushes.
+The [release workflow](https://github.com/MUDesigns/ytmd-lite/actions/workflows/release.yml) publishes the exact version in `src-tauri/tauri.conf.json` when a commit explicitly changes it from its parent (for example, `0.3.1`). Otherwise, it adds the run number to the patch component (base `0.3.1` plus run `12` produces `0.3.13`). Keep explicit version bumps higher than the latest published release, and update the package and Cargo manifests and lockfiles together. A `vX.Y.Z` tag builds that exact stable version; manual runs use the same rules as main pushes. Rerunning a release commit retains its version.
 
 Releases remain drafts until installers, signatures, and `latest.json` have uploaded successfully. An older build finishing late does not replace a newer release as Latest.
 
