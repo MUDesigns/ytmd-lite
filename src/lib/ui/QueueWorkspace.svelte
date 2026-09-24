@@ -32,6 +32,13 @@
 </script>
 
 <div class="queue-workspace">
+  <div class="workspace-section">
+    <label class="autoplay-toggle"><input type="checkbox" checked={!!player.autoplay}
+      onchange={(e) => playerCtl.setAutoplay(e.currentTarget.checked)} /> Autoplay similar songs</label>
+    <p>Continue with YouTube Music recommendations after your queue. Songs you add play first. Turning this off removes upcoming autoplay suggestions.</p>
+    {#if player.autoplayLoading}<p role="status">Finding similar songs…</p>{/if}
+    {#if player.autoplayError}<p role="status">{player.autoplayError}</p>{/if}
+  </div>
   <details class="workspace-section" open>
     <summary>Saved sessions <span>{sessions.length} / 30</span></summary>
     <p>Save your queue and position on this device. Resume replaces the current queue and starts playback.</p>
@@ -85,6 +92,7 @@
 
 <style>
   .queue-workspace { display: grid; gap: 12px; margin-bottom: 20px; }
+  .autoplay-toggle { cursor: pointer; font-weight: 600; color: var(--md-sys-color-primary); }
   .workspace-section { border: 1px solid var(--md-sys-color-outline); background: var(--md-sys-color-surface-container-low); padding: 12px; }
   summary { cursor: pointer; color: var(--md-sys-color-primary); font-weight: 600; }
   summary span { margin-left: 12px; color: var(--md-sys-color-on-surface-variant); font-size: 10px; font-weight: 400; }

@@ -23,6 +23,11 @@ pub fn get_lastfm_status(state: State<'_, AppState>) -> LastFmStatus {
 }
 
 #[tauri::command]
+pub async fn get_artist_genres(state: State<'_, AppState>, artist: String) -> Result<Vec<String>, String> {
+    state.lastfm.artist_genres(&artist).await
+}
+
+#[tauri::command]
 pub fn get_player_snapshot(state: State<'_, AppState>) -> PlayerState {
     state.player.read().clone()
 }

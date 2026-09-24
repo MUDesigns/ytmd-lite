@@ -1,11 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
-import { API_BASE, streamUrl } from "./api";
+import { API_BASE, streamUrl, loadSongRadio } from "./api";
 import type { MusicItem, PlayerState, QueueItem } from "./types";
 import { albumKey, arrangeQueue, readHeard, rememberHeard, type QueueRules, type ListeningSession } from "./listening";
 
 type Listener = (state: PlayerState) => void;
 
 const VOLUME_KEY = "ytmd.volume.v1";
+const AUTOPLAY_KEY = "ytmd.autoplay.v1";
+let autoplayOn = false;
+try { autoplayOn = localStorage.getItem(AUTOPLAY_KEY) === "true"; } catch { /* Optional preference. */ }
+let autoplayRequest: { controller: AbortController; promise: Promise<void> } | null = null;
+let autoplayAttempt = "";
+let autoplayError = "";
+let autoplayAdvancing = false;
+let queueEpoch = 0;
 
 function readVolume(): number {
   try {
@@ -185,7 +193,7 @@ function buildState(trackState = "Unknown"): PlayerState {
     resolved = "Error";
   } else if (userPaused) {
     resolved = "Paused";
-  } else if (loading || waitingForAudio || trackState === "Buffering") {
+  } else if (loading || waitingForAudio || autoplayAdvancing || trackState === "Buffering") {
     resolved = "Buffering";
   } else if (trackState === "Unknown") {
     resolved = a && !a.paused ? "Playing" : item ? "Paused" : "Unknown";
@@ -205,6 +213,9 @@ function buildState(trackState = "Unknown"): PlayerState {
     shuffle: shuffleOn,
     repeat: repeatMode,
     stopAfterAlbum: stopAfterAlbum || undefined,
+    autoplay: autoplayOn,
+    autoplayLoading: !!autoplayRequest,
+    autoplayError: autoplayError || undefined,
   };
 }
 
@@ -290,14 +301,98 @@ async function resolveSrc(videoId: string, signal: AbortSignal, refresh = false)
   return streamUrl(videoId);
 }
 
-function prepareNext() {
-  if (loading || userPaused || !currentItem()) return;
+function nextQueueIndex(): number {
   let index = queueIndex + 1;
   if (repeatMode === "one") index = queueIndex;
-  else if (shuffleOn && queue.length > 1) {
-    if (!shuffleBag.length) rebuildShuffleBag(queueIndex);
-    index = shuffleBag[0];
+  else if (shuffleOn) {
+    if (!shuffleBag.length && repeatMode === "all") rebuildShuffleBag(queueIndex);
+    // Explicit queue choices always precede automatically suggested music.
+    index = shuffleBag.find(i => !queue[i]?.autoplay) ?? shuffleBag[0] ?? -1;
+    if (index < 0 && repeatMode === "all" && queue.length) index = queueIndex;
   } else if (index >= queue.length && repeatMode === "all") index = 0;
+  return index >= 0 && index < queue.length ? index : -1;
+}
+
+function cancelAutoplayRequest() {
+  ++queueEpoch;
+  autoplayRequest?.controller.abort();
+  autoplayRequest = null;
+  autoplayAttempt = "";
+  autoplayError = "";
+  autoplayAdvancing = false;
+}
+
+async function extendAutoplay(): Promise<void> {
+  if (autoplayRequest) return autoplayRequest.promise;
+  const seed = currentItem();
+  if (!autoplayOn || !seed || repeatMode !== "off" || stopAfterAlbum || nextQueueIndex() >= 0 || autoplayAttempt === seed.videoId) return;
+  autoplayAttempt = seed.videoId;
+  const controller = new AbortController();
+  const promise = (async () => {
+    try {
+      const tracks = await loadSongRadio(seed.videoId, controller.signal);
+      if (controller.signal.aborted || !autoplayOn) return;
+      const seen = new Set(queue.map(t => t.videoId));
+      const added = playableItems(tracks).filter(t => {
+        if (seen.has(t.videoId)) return false;
+        seen.add(t.videoId);
+        return true;
+      }).slice(0, 20).map(t => ({ ...t, autoplay: true }));
+      if (!added.length) { autoplayError = "No more similar songs found. Choose another song to continue."; return; }
+      const start = queue.length;
+      queue = [...queue, ...added];
+      if (shuffleOn) shuffleBag.push(...added.map((_, i) => start + i));
+    } catch (e) {
+      if (!controller.signal.aborted) autoplayError = `Autoplay unavailable: ${errMsg(e)}`;
+    } finally {
+      if (!controller.signal.aborted) {
+        autoplayRequest = null;
+        sync();
+        prepareNext();
+      }
+    }
+  })();
+  autoplayRequest = { controller, promise };
+  sync();
+  return promise;
+}
+
+/** Preserve the current entry and unplayed shuffle choices when the list moves. */
+function replaceQueueOrder(next: QueueItem[]) {
+  const current = currentItem();
+  const pending = shuffleBag.map(i => queue[i]);
+  queue = next;
+  queueIndex = current ? queue.indexOf(current) : -1;
+  shuffleBag = pending.map(t => queue.indexOf(t)).filter(i => i >= 0 && i !== queueIndex);
+}
+
+export function setAutoplay(enabled: boolean) {
+  cancelAutoplayRequest();
+  autoplayOn = enabled;
+  try { localStorage.setItem(AUTOPLAY_KEY, String(enabled)); } catch { /* Optional preference. */ }
+  if (!enabled) {
+    replaceQueueOrder(queue.filter((t, i) => !t.autoplay || i === queueIndex ||
+      (shuffleOn ? !shuffleBag.includes(i) : i < queueIndex)));
+  }
+  sync();
+  prepareNext();
+}
+
+export function moveQueueItem(from: number, to: number) {
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= queue.length || to >= queue.length || from === to) return;
+  cancelAutoplayRequest();
+  const reordered = [...queue];
+  const [item] = reordered.splice(from, 1);
+  reordered.splice(to, 0, item);
+  replaceQueueOrder(reordered);
+  sync();
+  prepareNext();
+}
+
+function prepareNext() {
+  if (loading || userPaused || !currentItem()) return;
+  const index = nextQueueIndex();
+  if (index < 0) void extendAutoplay();
   const videoId = queue[index]?.videoId;
   if (stopAfterAlbum && albumKey(queue[index]) !== stopAfterAlbum) {
     prewarm?.controller.abort();
@@ -362,6 +457,7 @@ export function getSnapshot(): PlayerState {
 export async function playItems(items: MusicItem[], startIndex = 0) {
   const mapped = playableItems(items);
   if (!mapped.length) throw new Error("No playable tracks");
+  cancelAutoplayRequest();
   queue = mapped;
   stopAfterAlbum = "";
   queueIndex = Math.max(0, Math.min(startIndex, mapped.length - 1));
@@ -376,6 +472,7 @@ export async function playItems(items: MusicItem[], startIndex = 0) {
 export async function playItemsShuffled(items: MusicItem[]) {
   const mapped = playableItems(items);
   if (!mapped.length) throw new Error("No playable tracks");
+  cancelAutoplayRequest();
   queue = shuffleArray(mapped);
   stopAfterAlbum = "";
   queueIndex = 0;
@@ -399,9 +496,12 @@ export function addToQueue(items: MusicItem | MusicItem[]) {
   const list = Array.isArray(items) ? items : [items];
   const mapped = playableItems(list);
   if (!mapped.length) return 0;
+  cancelAutoplayRequest();
   const wasEmpty = queue.length === 0;
-  queue = [...queue, ...mapped];
-  if (shuffleOn) rebuildShuffleBag(queueIndex >= 0 ? queueIndex : undefined);
+  const firstAuto = queue.findIndex((t, i) => t.autoplay && i > queueIndex);
+  const insertAt = firstAuto < 0 ? queue.length : firstAuto;
+  replaceQueueOrder([...queue.slice(0, insertAt), ...mapped, ...queue.slice(insertAt)]);
+  if (shuffleOn) shuffleBag.push(...mapped.map(t => queue.indexOf(t)));
   if (wasEmpty) {
     queueIndex = 0;
     sync("Paused");
@@ -421,14 +521,16 @@ export function playNext(items: MusicItem | MusicItem[]) {
     return addToQueue(list);
   }
   const insertAt = queueIndex + 1;
-  queue = [...queue.slice(0, insertAt), ...mapped, ...queue.slice(insertAt)];
-  if (shuffleOn) rebuildShuffleBag(queueIndex);
+  cancelAutoplayRequest();
+  replaceQueueOrder([...queue.slice(0, insertAt), ...mapped, ...queue.slice(insertAt)]);
+  if (shuffleOn) shuffleBag.unshift(...mapped.map(t => queue.indexOf(t)));
   sync();
   prepareNext();
   return mapped.length;
 }
 
 export function clearQueue() {
+  cancelAutoplayRequest();
   stopAfterAlbum = "";
   activeLoad?.abort();
   activeLoad = null;
@@ -456,6 +558,7 @@ export function clearQueue() {
 }
 
 export function toggleShuffle(): boolean {
+  cancelAutoplayRequest();
   stopAfterAlbum = "";
   shuffleOn = !shuffleOn;
   if (shuffleOn && queue.length) rebuildShuffleBag(queueIndex >= 0 ? queueIndex : undefined);
@@ -466,6 +569,7 @@ export function toggleShuffle(): boolean {
 }
 
 export function toggleRepeat(): "off" | "one" | "all" {
+  cancelAutoplayRequest();
   stopAfterAlbum = "";
   repeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
   sync();
@@ -566,7 +670,9 @@ async function loadCurrent(autoplay: boolean, resumeAt = 0, recovering = false) 
 
 export async function playQueueIndex(index: number) {
   if (index < 0 || index >= queue.length) return;
+  cancelAutoplayRequest();
   queueIndex = index;
+  shuffleBag = shuffleBag.filter(i => i !== index);
   if (stopAfterAlbum && albumKey(queue[index]) !== stopAfterAlbum) stopAfterAlbum = "";
   userPaused = false;
   await loadCurrent(true);
@@ -575,7 +681,7 @@ export async function playQueueIndex(index: number) {
 export async function playPause() {
   const a = ensureAudio();
   if (!currentItem()) return;
-  if (loading) {
+  if (loading || autoplayAdvancing) {
     userPaused = !userPaused;
     if (userPaused) a.pause();
     sync(userPaused ? "Paused" : "Buffering");
@@ -616,32 +722,34 @@ export async function next() {
     return;
   }
 
-  let nextIndex = -1;
-  if (shuffleOn && queue.length > 1) {
-    if (!shuffleBag.length) rebuildShuffleBag(queueIndex);
-    nextIndex = shuffleBag.shift() ?? -1;
-    if (nextIndex < 0 && repeatMode === "all") {
-      rebuildShuffleBag(queueIndex);
-      nextIndex = shuffleBag.shift() ?? -1;
-    }
-  } else if (queueIndex + 1 < queue.length) {
-    nextIndex = queueIndex + 1;
-  } else if (repeatMode === "all" && queue.length) {
-    nextIndex = 0;
+  let nextIndex = nextQueueIndex();
+  if (nextIndex < 0 && autoplayOn) {
+    const seed = currentItem();
+    const epoch = queueEpoch;
+    userPaused = false;
+    autoplayAdvancing = true;
+    sync();
+    await extendAutoplay();
+    if (epoch === queueEpoch) autoplayAdvancing = false;
+    if (epoch !== queueEpoch || currentItem() !== seed || userPaused) return;
+    nextIndex = nextQueueIndex();
   }
 
   if (nextIndex < 0) {
     userPaused = true;
+    audio?.pause();
     stopProgress();
     sync("Paused");
     return;
   }
   queueIndex = nextIndex;
+  shuffleBag = shuffleBag.filter(i => i !== nextIndex);
   userPaused = false;
   await loadCurrent(true);
 }
 
 export async function previous() {
+  cancelAutoplayRequest();
   const a = ensureAudio();
   if (a.currentTime > 3) {
     a.currentTime = 0;
@@ -673,6 +781,7 @@ export async function seek(seconds: number) {
 
 /** Rules are applied explicitly to the upcoming queue after the user previews them. */
 export function applyQueueRules(rules: QueueRules) {
+  cancelAutoplayRequest();
   queue = arrangeQueue(queue, queueIndex, rules, readHeard());
   shuffleOn = false;
   shuffleBag = [];
@@ -683,6 +792,7 @@ export function applyQueueRules(rules: QueueRules) {
 export function setStopAfterAlbum(enabled: boolean) {
   const key = albumKey(currentItem() || undefined);
   if (enabled && !key) throw new Error("Album information is unavailable for this track. Start playback from an album page.");
+  cancelAutoplayRequest();
   stopAfterAlbum = enabled ? key : "";
   if (enabled) { shuffleOn = false; shuffleBag = []; repeatMode = "off"; }
   sync();
@@ -700,6 +810,7 @@ export async function restoreSession(session: ListeningSession) {
   stopAfterAlbum = session.stopAfterAlbum || "";
   if (stopAfterAlbum) { shuffleOn = false; repeatMode = "off"; }
   if (shuffleOn) rebuildShuffleBag(queueIndex);
+  if (!autoplayOn) setAutoplay(false);
   await loadCurrent(true, session.position);
 }
 

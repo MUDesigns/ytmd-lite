@@ -61,6 +61,7 @@ pub fn run() {
             server::prepare_app_update,
             server::restore_backend_after_update,
             commands::get_lastfm_status,
+            commands::get_artist_genres,
             commands::get_player_snapshot,
             commands::set_lastfm_enabled,
             commands::set_scrobble_percent,

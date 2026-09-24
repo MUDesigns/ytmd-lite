@@ -83,6 +83,7 @@ export function readSessions(): ListeningSession[] {
         Array.isArray(t.thumbnails) && t.thumbnails.every((v: unknown) => typeof v === "string") &&
         (t.album === undefined || typeof t.album === "string") &&
         (t.albumId === undefined || typeof t.albumId === "string") &&
+        (t.autoplay === undefined || typeof t.autoplay === "boolean") &&
         (t.channelId === undefined || typeof t.channelId === "string")) &&
       Number.isInteger(s.index) && s.index >= 0 && s.index < s.queue.length &&
       Number.isFinite(s.position) && s.position >= 0 && Number.isFinite(s.volume) && s.volume >= 0 && s.volume <= 100 &&

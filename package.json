@@ -1,6 +1,6 @@
 {
   "name": "ytmd-lite",
-  "version": "0.3.2",
+  "version": "0.4.1",
   "description": "Lightweight YouTube Music Desktop client (Tauri 2) with Last.fm",
   "type": "module",
   "scripts": {

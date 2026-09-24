@@ -146,6 +146,32 @@ test("Library search finds the Liked Songs collection by name", async (t) => {
   assert.equal(results.items[0].playlistId, "LM");
 });
 
+test("Search deduplicates top results repeated in category shelves", async (t) => {
+  mockApi(t, {
+    "/search?q=sadness+in+the+distant": {
+      results: [
+        { type: "song", videoId: "wQzM9QRxCMI", title: "in the distant travels", artists: "Sadness", thumbnail: "top.jpg" },
+        { type: "album", browseId: "album-id", title: "in the distant travels" },
+        { type: "song", videoId: "wQzM9QRxCMI", title: "in the distant travels", artists: "Sadness" },
+        { type: "song", videoId: "other-recording", title: "in the distant travels", artists: "Sadness" },
+        { type: "album", browseId: "album-id", title: "in the distant travels" },
+      ],
+    },
+  });
+  const results = await search("sadness in the distant");
+  assert.deepEqual(results.items.map((item) => item.id), ["wQzM9QRxCMI", "album-id", "other-recording"]);
+  assert.deepEqual(results.items[0].thumbnails, ["top.jpg"]);
+  assert.deepEqual(results.shelves[0].items, results.items);
+});
+
+test("Filtered search also removes duplicate recordings", async (t) => {
+  const song = { type: "song", videoId: "same-id", title: "Same recording" };
+  mockApi(t, { "/search?q=recording&filter=songs": { results: [song, song] } });
+  const results = await search("recording", "songs");
+  assert.equal(results.items.length, 1);
+  assert.equal(results.shelves[0].items.length, 1);
+});
+
 test("An unrelated album named Liked Songs still opens as an album", async (t) => {
   const calls = mockApi(t, { "/album/MPRE-album": { title: "Liked Songs", tracks: [] } });
   const item = mapItem({ type: "album", browseId: "MPRE-album", title: "Liked Songs" });

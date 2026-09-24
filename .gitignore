@@ -20,6 +20,7 @@ python-backend/.venv
 python-backend/build_tmp
 __pycache__/
 python-backend/*_cache
+python-backend/imgcache/
 python-backend/profiles
 python-backend/ytdlp
 vite.config.js.timestamp-*

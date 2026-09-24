@@ -44,6 +44,8 @@ export type BrowseResult = {
   meta?: string;
   kind?: "album" | "playlist" | "artist" | "mood" | "collection";
   subscribed?: boolean;
+  radioId?: string;
+  genres?: string[];
   channelId?: string;
 };
 
@@ -54,6 +56,7 @@ export type EngineStatus = {
 };
 
 export type QueueItem = {
+  autoplay?: boolean;
   album?: string;
   albumId?: string;
   videoId: string;
@@ -87,6 +90,9 @@ export type PlayerState = {
   shuffle?: boolean;
   repeat?: "off" | "one" | "all";
   stopAfterAlbum?: string;
+  autoplay?: boolean;
+  autoplayLoading?: boolean;
+  autoplayError?: string;
 };
 
 export type LastFmStatus = {

@@ -1,12 +1,13 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { emitTo, listen } from "@tauri-apps/api/event";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     browseDetail,
     getLikedIds,
     likeSong,
     loadExplore,
+    loadArtistRadio,
     loadHome,
     loadLibrary,
     loadRecentSearches,
@@ -43,7 +44,7 @@
   import QueueWorkspace from "$lib/ui/QueueWorkspace.svelte";
   import WorkbenchExplorer from "$lib/ui/WorkbenchExplorer.svelte";
   import { defaultWorkbenchFiles, loadWorkbenchFiles, workbenchFilename, viewLabels } from "$lib/workbench";
-  import { readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
+  import { readHeard, readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
   import type { PaletteCommand } from "$lib/commands";
   import { miniPlayerUpdate, type MiniLikeRequest, type MiniLikeResult } from "$lib/mini-player";
 
@@ -206,6 +207,7 @@
     statusMsg = "Opening Google sign-in…";
     try {
       await invoke("open_login_window");
+      statusMsg = "Sign in in the Google window, then choose Use this account.";
     } catch (e) {
       statusMsg = String(e);
     }
@@ -420,7 +422,7 @@
     try {
       let data: BrowseResult | null = null;
       if (target === "home") data = await loadHome();
-      else if (target === "explore") data = await loadExplore();
+      else if (target === "explore") data = await loadExplore([...readHeard()]);
       else if (target === "library") data = await loadLibrary();
       else if (target === "detail" && targetDetail) {
         [, data] = await Promise.all([refreshLiked(), browseDetail(targetDetail)]);
@@ -429,7 +431,16 @@
       if (target === "home") homeData = data;
       else if (target === "explore") exploreData = data;
       else if (target === "library") libraryData = data;
-      else if (target === "detail") detailData = data;
+      else if (target === "detail") {
+        detailData = data;
+        if (data?.kind === "artist" && data.title) {
+          void invoke<string[]>("get_artist_genres", { artist: data.title }).then(genres => {
+            if (request === browseRequest && panel === "detail" && detailData) {
+              detailData = { ...detailData, genres };
+            }
+          }).catch(() => { /* Optional metadata must not block the artist page. */ });
+        }
+      }
       if (!engine.signedIn) {
         const auth = await validateAuth();
         if (auth.valid) setSignedIn(true, auth.profile ?? null);
@@ -544,6 +555,22 @@
     });
   }
 
+  let radioBusy = $state(false);
+  async function startArtistRadio(item: MusicItem | null = detailItem) {
+    if (!item?.browseId || radioBusy) return;
+    radioBusy = true;
+    statusMsg = `Starting ${item.title} radio…`;
+    try {
+      const tracks = await loadArtistRadio(item.browseId);
+      await playerCtl.playItems(tracks, 0);
+      statusMsg = `Playing ${item.title} radio`;
+    } catch (e) {
+      statusMsg = String(e);
+    } finally {
+      radioBusy = false;
+    }
+  }
+
   async function toggleArtistSubscribe() {
     const browseId = detail?.browseId || detailItem?.browseId || detailData?.channelId;
     if (!browseId || detailData?.kind !== "artist" || subscribeBusy) return;
@@ -580,10 +607,12 @@
     try {
       statusMsg = `Buffering ${item.title}…`;
       if (item.videoId && item.type === "song") {
-        if (panel === "detail" && detailData?.items?.length) {
-          const idx = detailData.items.findIndex((t) => t.videoId === item.videoId);
+        const contextTracks = panel === "explore" ? exploreData?.items
+          : panel === "detail" ? detailData?.items : undefined;
+        if (contextTracks?.length) {
+          const idx = contextTracks.findIndex((t) => t.videoId === item.videoId);
           if (idx >= 0) {
-            await playerCtl.playItems(detailData.items, idx);
+            await playerCtl.playItems(contextTracks, idx);
             statusMsg = `Playing ${item.title}`;
             return;
           }
@@ -703,6 +732,9 @@
     if (canOpen) {
       actions.push({ id: "open", label: "Open", icon: "open_in_new" });
     }
+    if (item.type === "artist" && item.browseId) {
+      actions.push({ id: "radio", label: "Start artist radio", icon: "radio", disabled: radioBusy });
+    }
     const artist =
       item.artistLinks?.find((a) => a.name) ||
       (item.artistBrowseId
@@ -737,6 +769,7 @@
     else if (id === "queue") await queueItem(item, false);
     else if (id === "next") await queueItem(item, true);
     else if (id === "open") await openItem(item);
+    else if (id === "radio") await startArtistRadio(item);
     else if (id === "artist") {
       const artist =
         item.artistLinks?.find((a) => a.name) ||
@@ -751,6 +784,28 @@
 
   async function playQueueIndex(index: number) {
     await playerCtl.playQueueIndex(index);
+  }
+
+  let draggedQueueIndex = $state<number | null>(null);
+  let queueDropIndex = $state<number | null>(null);
+  let draggedQueue: PlayerState["queue"];
+  function finishQueueDrag() {
+    draggedQueueIndex = null;
+    queueDropIndex = null;
+    draggedQueue = undefined;
+  }
+  async function moveQueueWithKeyboard(e: KeyboardEvent, index: number) {
+    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      const target = index + (e.key === "ArrowUp" ? -1 : 1);
+      if (target < 0 || target >= (player.queue?.length || 0)) return;
+      playerCtl.moveQueueItem(index, target);
+      await tick();
+      document.querySelector<HTMLElement>(`[data-queue-index="${target}"]`)?.focus();
+    } else if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      void playQueueIndex(index);
+    }
   }
 
   const SEARCH_FILTERS: { id: SearchFilter; label: string }[] = [
@@ -1181,6 +1236,11 @@
               </div>
             {/if}
             {#if detailData?.kind === "artist"}
+              {#if detailData.genres?.length}
+                <div class="detail-sub muted" title="Popular genre tags from Last.fm" aria-label="Artist genres">
+                  {detailData.genres.join(" · ")}
+                </div>
+              {/if}
               {#if detailData.meta}
                 <div class="detail-sub muted">{detailData.meta}</div>
               {/if}
@@ -1218,6 +1278,10 @@
                 Add to queue
               </button>
               {#if detailData?.kind === "artist"}
+                <button class="btn" disabled={radioBusy || loading} onclick={() => startArtistRadio()}>
+                  <span class="material-symbols-outlined">radio</span>
+                  {radioBusy ? "Starting radio…" : "Start artist radio"}
+                </button>
                 <button
                   class="btn"
                   class:subscribed={detailData.subscribed}
@@ -1357,6 +1421,13 @@
         {:else if panel !== "home"}
           <div class="page-head">
             <h1 class="page-title">{viewLabels[panel]}</h1>
+            {#if panel === "explore"}
+              <button class="btn primary" disabled={loading || !exploreData?.items.length}
+                onclick={() => exploreData?.items[0] && playFromUi(exploreData.items[0])}>
+                <span class="material-symbols-outlined">play_arrow</span>
+                Play all
+              </button>
+            {/if}
             <button class="icon-btn" title="Refresh" onclick={() => refreshPanel(panel)} disabled={loading}>
               <span class="material-symbols-outlined">refresh</span>
             </button>
@@ -1380,11 +1451,41 @@
               <p class="muted">Queue is empty — play something from Home.</p>
             {:else}
               {#each player.queue as item, index (item.videoId + index)}
-                <button
+                <div
                   class="queue-row"
+                  role="button"
+                  tabindex="0"
+                  data-queue-index={index}
+                  class:drop-target={queueDropIndex === index}
                   class:selected={item.selected || index === player.queueIndex}
                   onclick={() => playQueueIndex(index)}
+                  onkeydown={(e) => moveQueueWithKeyboard(e, index)}
+                  ondragover={(e) => {
+                    if (draggedQueueIndex === null) return;
+                    e.preventDefault();
+                    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+                    queueDropIndex = index;
+                  }}
+                  ondrop={(e) => {
+                    e.preventDefault();
+                    if (draggedQueueIndex !== null && draggedQueue === player.queue) {
+                      playerCtl.moveQueueItem(draggedQueueIndex, index);
+                    }
+                    finishQueueDrag();
+                  }}
                 >
+                  <button class="icon-btn queue-drag" draggable="true" aria-label={`Move ${item.title}`}
+                    title="Drag to reorder · Alt+↑/↓ to move" onclick={(e) => e.stopPropagation()}
+                    ondragstart={(e) => {
+                      draggedQueueIndex = index;
+                      draggedQueue = player.queue;
+                      if (e.dataTransfer) {
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", String(index));
+                      }
+                    }} ondragend={finishQueueDrag}>
+                    <span class="material-symbols-outlined">drag_indicator</span>
+                  </button>
                   <div class="q-art">
                     {#if thumb(item)}
                       <img src={thumb(item)} alt="" referrerpolicy="no-referrer" />
@@ -1404,8 +1505,9 @@
                       />
                     </div>
                   </div>
+                  {#if item.autoplay}<span class="muted">Autoplay</span>{/if}
                   <span class="q-idx">{index + 1}</span>
-                </button>
+                </div>
               {/each}
             {/if}
           </div>
@@ -1414,6 +1516,7 @@
             <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
           {/each}
         {:else if panel === "explore"}
+          {#if exploreData?.subtitle}<p class="muted">{exploreData.subtitle}</p>{/if}
           {#each shelvesOf(exploreData) as shelf (shelf.id + shelf.title)}
             <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
           {/each}
@@ -1607,6 +1710,9 @@
 </div>
 
 <style>
+  .queue-drag { cursor: grab; flex-shrink: 0; }
+  .queue-drag:active { cursor: grabbing; }
+  .queue-row.drop-target { outline: 2px solid var(--md-sys-color-primary); outline-offset: -2px; }
   .shell {
     width: 100%;
     height: 100%;

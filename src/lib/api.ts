@@ -266,28 +266,92 @@ export async function loadHome(): Promise<BrowseResult> {
   return { title: "Home", shelves, items: [] };
 }
 
-export async function loadExplore(): Promise<BrowseResult> {
-  const groups = await api<Record<string, Array<{ title?: string; params?: string }>>>(
-    "/mood/categories",
-  );
-  const shelves: MusicItem[] = Object.entries(groups).map(([section, chips], i) => ({
-    type: "shelf",
-    id: `mood-${i}-${section}`,
-    title: section,
-    thumbnails: [],
-    items: (chips || []).map((c) => {
-      const title = c.title || "Mood";
-      return {
-        type: "mood" as const,
-        id: c.params || title,
-        title,
-        thumbnails: [],
-        params: c.params,
-        color: colorFor(title),
-      };
-    }),
+/** Build discovery from personal seeds, never from unrelated genre charts. */
+export async function loadExplore(heardIds: string[] = []): Promise<BrowseResult> {
+  const heard = new Set(heardIds);
+  let seeds = [...heard].reverse().slice(0, 3).map(videoId => ({ videoId, title: "" }));
+  const fromLikes = !seeds.length;
+  if (fromLikes) {
+    const liked = await api<{ tracks?: Record<string, unknown>[] }>("/liked?limit=30", { signal: AbortSignal.timeout(15000) });
+    seeds = uniqueItems((liked.tracks || []).map(mapTrack)).filter(t => t.videoId)
+      .slice(0, 3).map(t => ({ videoId: t.videoId!, title: t.title }));
+  }
+  if (!seeds.length) return {
+    title: "Discover", shelves: [], items: [],
+    subtitle: "Play some songs or like a few favorites to build your Discover page.",
+  };
+
+  const radios = await Promise.allSettled(seeds.map(seed => loadSongRadio(seed.videoId)));
+  if (radios.every(result => result.status === "rejected")) {
+    throw new Error("Could not load recommendations. Try refreshing Discover.");
+  }
+  const shelves: MusicItem[] = [];
+  const seen = new Set([...heard, ...seeds.map(seed => seed.videoId)]);
+  const artists = new Map<string, string>();
+  radios.forEach((result, i) => {
+    if (result.status !== "fulfilled") return;
+    const seed = seeds[i];
+    const source = result.value.find(t => t.videoId === seed.videoId);
+    if (source?.artistBrowseId) artists.set(source.artistBrowseId, source.subtitle || "this artist");
+    const items = result.value.filter(item => item.videoId && !seen.has(item.videoId)).slice(0, 12);
+    items.forEach(item => seen.add(item.videoId!));
+    if (items.length) shelves.push({
+      type: "shelf", id: `discover-${seed.videoId}`, thumbnails: [], items,
+      title: `Because you ${fromLikes ? "like" : "played"} ${source?.title || seed.title || "a recent favorite"}`,
+    });
+  });
+  const related = await Promise.allSettled([...artists].map(async ([browseId, name]) => {
+    const data = await api<{ related?: Record<string, unknown>[] }>(`/artist/${encodeURIComponent(browseId)}`, { signal: AbortSignal.timeout(15000) });
+    return { name, items: uniqueItems((data.related || []).map(t => mapItem({ ...t, type: "artist" }))) };
   }));
-  return { title: "Explore", shelves, items: [] };
+  const seenArtists = new Set(artists.keys());
+  related.forEach((result, i) => {
+    if (result.status !== "fulfilled") return;
+    const items = result.value.items.filter(t => t.browseId && !seenArtists.has(t.browseId)).slice(0, 8);
+    items.forEach(item => seenArtists.add(item.browseId!));
+    if (items.length) shelves.push({ type: "shelf", id: `discover-artists-${i}`, title: `Artists related to ${result.value.name}`, thumbnails: [], items });
+  });
+  return {
+    title: "Discover", shelves,
+    // Queue recommendations in their visible shelf order, excluding artist cards.
+    items: shelves.flatMap(shelf => shelf.items || []).filter(item => item.type === "song" && item.videoId),
+    subtitle: shelves.length
+      ? `Inspired by your ${fromLikes ? "liked songs" : "recent listening on this device"}. Tracks already heard here are hidden.`
+      : "No new recommendations from these favorites yet. Try listening to another artist, then refresh.",
+  };
+}
+
+function uniqueItems(items: MusicItem[]): MusicItem[] {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+export async function loadSongRadio(videoId: string, signal?: AbortSignal): Promise<MusicItem[]> {
+  const timeout = AbortSignal.timeout(15000);
+  const data = await api<{ tracks?: Record<string, unknown>[] }>(
+    `/radio/seed?videoId=${encodeURIComponent(videoId)}`, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout },
+  );
+  return uniqueItems((data.tracks || []).map(mapTrack).filter(t => t.videoId));
+}
+
+export async function loadArtistRadio(browseId: string): Promise<MusicItem[]> {
+  const artist = await browseDetail({ browseId });
+  let tracks: MusicItem[];
+  if (artist.radioId) {
+    const data = await api<{ tracks?: Record<string, unknown>[] }>(
+      `/radio/${encodeURIComponent(artist.radioId)}`, { signal: AbortSignal.timeout(15000) },
+    );
+    tracks = uniqueItems((data.tracks || []).map(mapTrack).filter(t => t.videoId));
+  } else {
+    const seed = artist.items.find(t => t.videoId);
+    tracks = seed ? await loadSongRadio(seed.videoId!) : [];
+  }
+  if (!tracks.length) throw new Error("No radio tracks are available for this artist. Try another artist.");
+  return tracks;
 }
 
 export async function loadLibrary(): Promise<BrowseResult> {
@@ -357,7 +421,14 @@ export async function search(
   const params = new URLSearchParams({ q: query });
   if (filter !== "all") params.set("filter", filter);
   const data = await api<{ results?: Record<string, unknown>[] }>(`/search?${params}`);
-  const items = (data.results || []).map(mapItem);
+  // Mixed search can repeat a top result in its song/video/album category.
+  // Once flattened into one shelf, repeats would collide in the keyed grid.
+  const seen = new Set<string>();
+  const items = (data.results || []).map(mapItem).filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
   const shelfTitle =
     filter === "all"
       ? "Results"
@@ -570,7 +641,9 @@ export async function browseDetail(opts: {
       subscribers?: string;
       subscribed?: boolean;
       channelId?: string;
-    }>(`/artist/${encodeURIComponent(bid)}`);
+      radioId?: string;
+      related?: Record<string, unknown>[];
+    }>(`/artist/${encodeURIComponent(bid)}`, { signal: AbortSignal.timeout(15000) });
     const tracks = (data.tracks || []).map(mapTrack);
     const releases: Record<string, MusicItem[]> = { albums: [], eps: [], singles: [], other: [] };
     for (const [items, fallback] of [[data.albums || [], "albums"], [data.singles || [], "other"]] as const) {
@@ -592,6 +665,8 @@ export async function browseDetail(opts: {
         });
       }
     }
+    const related = uniqueItems((data.related || []).map(t => mapItem({ ...t, type: "artist" }))).filter(t => t.browseId);
+    if (related.length) shelves.push({ type: "shelf", id: "artist-related", title: "Fans might also like", thumbnails: [], items: related });
     const cover =
       pickThumbUrl(data as Record<string, unknown>) ||
       tracks.find((t) => t.thumbnails?.[0])?.thumbnails?.[0] ||
@@ -612,6 +687,7 @@ export async function browseDetail(opts: {
       thumbnails: cover ? [cover] : [],
       meta,
       kind: "artist",
+      radioId: data.radioId || undefined,
       subscribed: !!data.subscribed,
       channelId: data.channelId ? String(data.channelId) : bid,
     };

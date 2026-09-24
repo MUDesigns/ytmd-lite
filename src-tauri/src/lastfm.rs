@@ -6,12 +6,55 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
 use tokio::time::sleep;
 
 const API_ROOT: &str = "https://ws.audioscrobbler.com/2.0/";
+
+fn top_artist_genres(data: &serde_json::Value) -> Vec<String> {
+    let Some(tags) = data.pointer("/toptags/tag").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut genres = Vec::new();
+    // Last.fm orders tags by popularity. Omit common personal collection tags.
+    for tag in tags {
+        let Some(name) = tag.get("name").and_then(|v| v.as_str()) else { continue; };
+        let name = name.trim().to_lowercase();
+        if name.is_empty() || name.len() > 60 || genres.contains(&name)
+            || matches!(name.as_str(), "seen live" | "favorites" | "favourites" | "favorite"
+                | "favourite" | "my favorites" | "my favourites" | "owned" | "albums i own") {
+            continue;
+        }
+        genres.push(name);
+        if genres.len() == 3 { break; }
+    }
+    genres
+}
+
+#[cfg(test)]
+mod genre_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_popularity_and_skips_duplicate_or_personal_tags() {
+        let data = serde_json::json!({"toptags": {"tag": [
+            {"name": "seen live"}, {"name": " Shoegaze "}, {"name": "shoegaze"},
+            {"name": ""}, {"name": null}, {"name": "dream pop"},
+            {"name": "blackgaze"}, {"name": "ambient"}
+        ]}});
+        assert_eq!(top_artist_genres(&data), vec!["shoegaze", "dream pop", "blackgaze"]);
+    }
+
+    #[test]
+    fn missing_or_malformed_tags_are_optional() {
+        for data in [serde_json::json!({}), serde_json::json!({"toptags": {"tag": null}}),
+            serde_json::json!({"toptags": {"tag": [{"name": 42}]}})] {
+            assert!(top_artist_genres(&data).is_empty());
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +117,7 @@ pub struct LastFmService {
     client: reqwest::Client,
     /// Current scrobble timer generation; bumping cancels the previous timer.
     cancel_generation: Mutex<u64>,
+    artist_genres: Mutex<BTreeMap<String, (Instant, Vec<String>)>>,
 }
 
 impl LastFmService {
@@ -98,7 +142,34 @@ impl LastFmService {
             }),
             client: reqwest::Client::new(),
             cancel_generation: Mutex::new(0),
+            artist_genres: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Public metadata: no Last.fm login or scrobbling opt-in is required.
+    pub async fn artist_genres(&self, artist: &str) -> Result<Vec<String>, String> {
+        let artist = artist.trim();
+        if artist.is_empty() { return Ok(Vec::new()); }
+        let key = artist.to_lowercase();
+        if let Some((saved, genres)) = self.artist_genres.lock().get(&key) {
+            if saved.elapsed() < Duration::from_secs(86400) { return Ok(genres.clone()); }
+        }
+        let api_key = self.inner.lock().credentials.as_ref().map(|c| c.api_key.clone());
+        let Some(api_key) = api_key else { return Ok(Vec::new()); };
+        let response = self.client.get(API_ROOT)
+            .query(&[("method", "artist.getTopTags"), ("artist", artist),
+                ("api_key", api_key.as_str()), ("format", "json"), ("autocorrect", "1")])
+            .timeout(Duration::from_secs(8))
+            .send().await.map_err(|_| "Artist genres unavailable".to_string())?
+            .error_for_status().map_err(|_| "Artist genres unavailable".to_string())?;
+        let data: serde_json::Value = response.json().await
+            .map_err(|_| "Invalid artist genres response".to_string())?;
+        if data.get("error").is_some() { return Err("Artist genres unavailable".into()); }
+        let genres = top_artist_genres(&data);
+        let mut cache = self.artist_genres.lock();
+        if cache.len() >= 256 { cache.clear(); }
+        cache.insert(key, (Instant::now(), genres.clone()));
+        Ok(genres)
     }
 
     pub fn status(&self) -> LastFmStatus {

@@ -15,8 +15,6 @@ impl ServerProcess {
     }
 }
 
-pub const API_BASE: &str = "http://127.0.0.1:9847";
-
 fn port_open() -> bool {
     std::net::TcpStream::connect_timeout(
         &"127.0.0.1:9847".parse().unwrap(),
@@ -90,6 +88,13 @@ fn server_candidates(resource_dir: Option<&Path>) -> Vec<PathBuf> {
     );
 
     bins.extend(pys);
+    // `tauri dev` must use the checkout and its adjacent virtual environment,
+    // not Tauri's resource copy under target/debug (which has no .venv).
+    if cfg!(debug_assertions) {
+        let source = manifest.join("..").join("python-backend").join("server.py");
+        bins.retain(|path| path != &source);
+        bins.insert(0, source);
+    }
     bins
 }
 
@@ -208,6 +213,11 @@ pub fn ensure_server(state: &ServerProcess, resource_dir: Option<PathBuf>) -> Re
             log::info!("YTMD API ready on :9847 (log: {})", log_path.display());
             return Ok(true);
         }
+        if let Some(child) = state.0.lock().map_err(|e| e.to_string())?.as_mut() {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!("Catalog backend exited ({status}) — see {}", log_path.display()));
+            }
+        }
         std::thread::sleep(Duration::from_millis(250));
     }
     let msg = format!(
@@ -293,5 +303,23 @@ fn ureq_shutdown() {
         let _ = stream.write_all(
             b"POST /shutdown HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn development_prefers_checkout_backend_over_copied_resources() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let resources = manifest.join("target").join("debug");
+        let candidates = server_candidates(Some(&resources));
+        let source = manifest.join("..").join("python-backend").join("server.py");
+        if cfg!(debug_assertions) {
+            assert_eq!(candidates.first(), Some(&source));
+        }
+        assert_eq!(candidates.iter().filter(|path| *path == &source).count(), 1);
+        assert!(candidates.contains(&resources.join("_up_").join("python-backend").join("server.py")));
     }
 }

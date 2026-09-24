@@ -6,12 +6,15 @@ import ts from "typescript";
 const listeningSource = await readFile(new URL("../src/lib/listening.ts", import.meta.url), "utf8");
 const listeningCode = ts.transpileModule(listeningSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 const listeningUrl = `data:text/javascript;base64,${Buffer.from(listeningCode).toString("base64")}`;
+const apiSource = await readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+const apiCode = ts.transpileModule(apiSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const apiUrl = `data:text/javascript;base64,${Buffer.from(apiCode).toString("base64")}`;
 
 const source = (await readFile(new URL("../src/lib/player.ts", import.meta.url), "utf8"))
   .replace('from "./listening"', `from "${listeningUrl}"`)
   .replace('import { invoke } from "@tauri-apps/api/core";', 'const invoke = async () => {};')
-  .replace('import { API_BASE, streamUrl } from "./api";',
-    'const API_BASE = "http://localhost"; const streamUrl = id => `/audio-stream/${id}`;');
+  .replace('import { API_BASE, streamUrl, loadSongRadio } from "./api";',
+    `import { loadSongRadio } from "${apiUrl}"; const API_BASE = "http://localhost"; const streamUrl = id => \`/audio-stream/\${id}\`;`);
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
@@ -219,6 +222,165 @@ test("playing prepares only the next song, and queue edits replace preparation",
   player.playNext(track("inserted"));
   await flush();
   assert.equal(new URL(fetchMock.mock.calls.at(-1).arguments[0]).pathname, "/audio-stream/inserted/warm");
+});
+
+test("autoplay appends unique radio songs after the explicit queue and continues playback", async t => {
+  const { player, audios, fetchMock } = await setup(t, async url => Response.json(
+    new URL(url).pathname.startsWith("/radio/")
+      ? { tracks: [track("a"), track("b"), track("similar"), track("similar"), track("later")] }
+      : { ok: true }));
+  player.setAutoplay(true);
+  await player.playItems([track("a"), track("b")]);
+  assert.equal(fetchMock.mock.calls.filter(c => c.arguments[0].includes("/radio/")).length, 0);
+  await player.next();
+  await flush();
+  assert.deepEqual(player.getSnapshot().queue.map(t => t.videoId), ["a", "b", "similar", "later"]);
+  assert.equal(player.getSnapshot().queue[2].autoplay, true);
+  player.addToQueue(track("manual"));
+  assert.deepEqual(player.getSnapshot().queue.map(t => t.videoId), ["a", "b", "manual", "similar", "later"]);
+  audios[0].dispatchEvent(new Event("ended"));
+  await flush();
+  assert.equal(player.getSnapshot().videoDetails.id, "manual");
+  await player.next();
+  assert.equal(player.getSnapshot().videoDetails.id, "similar");
+  player.setAutoplay(false);
+  assert.deepEqual(player.getSnapshot().queue.map(t => t.videoId), ["a", "b", "manual", "similar"]);
+  assert.equal(audios[0].paused, false);
+});
+
+test("autoplay preference persists across player instances", async t => {
+  const saved = new Map();
+  mockStorage(t, { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) });
+  const { player } = await setup(t);
+  assert.equal(player.getSnapshot().autoplay, false);
+  player.setAutoplay(true);
+  assert.equal((await setup(t)).player.getSnapshot().autoplay, true);
+  player.setAutoplay(false);
+  assert.equal((await setup(t)).player.getSnapshot().autoplay, false);
+});
+
+test("late autoplay responses cannot change a cleared, replaced, or disabled queue", async t => {
+  for (const action of ["clear", "replace", "disable"]) {
+    let finish;
+    const { player } = await setup(t, url => new URL(url).pathname.startsWith("/radio/")
+      ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(Response.json({ ok: true })));
+    player.setAutoplay(true);
+    await player.playItem(track("old"));
+    await flush();
+    if (action === "clear") player.clearQueue();
+    else if (action === "disable") player.setAutoplay(false);
+    else await player.playItems([track("replacement"), track("second")]);
+    finish(Response.json({ tracks: [track("stale")] }));
+    await flush();
+    assert.ok(!player.getSnapshot().queue.some(t => t.videoId === "stale"));
+    assert.equal(player.getSnapshot().autoplayLoading, false);
+  }
+});
+
+test("pausing while waiting for autoplay does not start the returned song", async t => {
+  let finish;
+  const { player, audios } = await setup(t, url => new URL(url).pathname.startsWith("/radio/")
+    ? new Promise(resolve => { finish = resolve; }) : Promise.resolve(Response.json({ ok: true })));
+  player.setAutoplay(true);
+  await player.playItem(track("seed"));
+  const advancing = player.next();
+  await player.playPause();
+  finish(Response.json({ tracks: [track("similar")] }));
+  await advancing;
+  assert.equal(player.getSnapshot().videoDetails.id, "seed");
+  assert.equal(audios[0].paused, true);
+  assert.equal(player.getSnapshot().queue.length, 2);
+});
+
+test("autoplay failures stop at the queue end without retry loops", async t => {
+  const { player, fetchMock } = await setup(t, async url => new URL(url).pathname.startsWith("/radio/")
+    ? Response.json({ error: "offline" }, { status: 503 }) : Response.json({ ok: true }));
+  player.setAutoplay(true);
+  await player.playItem(track("seed"));
+  await flush();
+  await player.next();
+  assert.equal(player.getSnapshot().trackState, "Paused");
+  assert.match(player.getSnapshot().autoplayError, /offline/);
+  assert.equal(fetchMock.mock.calls.filter(c => c.arguments[0].includes("/radio/")).length, 1);
+});
+
+test("shuffle exhausts original tracks before autoplay and repeat prevents extension", async t => {
+  const { player, fetchMock } = await setup(t, async url => Response.json(new URL(url).pathname.startsWith("/radio/")
+    ? { tracks: [track("similar"), track("later")] } : { ok: true }));
+  player.setAutoplay(true);
+  await player.playItems([track("a"), track("b"), track("c")]);
+  player.toggleShuffle();
+  const heard = [player.getSnapshot().videoDetails.id];
+  await player.next(); heard.push(player.getSnapshot().videoDetails.id);
+  await player.next(); heard.push(player.getSnapshot().videoDetails.id);
+  await flush();
+  assert.equal(new Set(heard).size, 3);
+  await player.next();
+  assert.equal(player.getSnapshot().videoDetails.id, "similar");
+  player.setAutoplay(false);
+  player.clearQueue();
+  player.toggleShuffle();
+  player.toggleRepeat();
+  player.setAutoplay(true);
+  const before = fetchMock.mock.callCount();
+  await player.playItem(track("repeat"));
+  await player.next();
+  assert.ok(fetchMock.mock.calls.slice(before).every(c => !c.arguments[0].includes("/radio/")));
+});
+
+test("moving queue entries preserves the exact current entry, progress, and next track", async t => {
+  const { player, audios } = await setup(t);
+  await player.playItems([track("same"), track("current"), track("same"), track("last")], 1);
+  audios[0].currentTime = 37;
+  const src = audios[0].src;
+  player.moveQueueItem(3, 2);
+  player.moveQueueItem(0, 3);
+  assert.equal(player.getSnapshot().queueIndex, 0);
+  assert.equal(player.getSnapshot().videoDetails.id, "current");
+  assert.equal(audios[0].currentTime, 37);
+  assert.equal(audios[0].src, src);
+  assert.deepEqual(player.getSnapshot().queue.map(t => t.videoId), ["current", "last", "same", "same"]);
+  await player.next();
+  assert.equal(player.getSnapshot().videoDetails.id, "last");
+});
+
+test("autoplay keeps extending successive batches and respects stop after album", async t => {
+  let batch = 0;
+  const { player, audios, fetchMock } = await setup(t, async url => Response.json(new URL(url).pathname.startsWith("/radio/")
+    ? { tracks: [track(`suggestion-${++batch}`)] } : { ok: true }));
+  player.setAutoplay(true);
+  await player.playItem(track("seed"));
+  await flush();
+  await player.next();
+  await flush();
+  await player.next();
+  await flush();
+  assert.equal(player.getSnapshot().videoDetails.id, "suggestion-2");
+  assert.equal(player.getSnapshot().queue.at(-1).videoId, "suggestion-3");
+  await player.playItems([{ ...track("album-first"), albumId: "album" }, { ...track("album-last"), albumId: "album" }]);
+  player.setStopAfterAlbum(true);
+  const before = fetchMock.mock.callCount();
+  await player.next();
+  audios[0].dispatchEvent(new Event("ended"));
+  await flush();
+  assert.equal(player.getSnapshot().trackState, "Paused");
+  assert.ok(fetchMock.mock.calls.slice(before).every(c => !c.arguments[0].includes("/radio/")));
+});
+
+test("reordering in shuffle preserves remaining choices without replaying the current song", async t => {
+  const { player, audios } = await setup(t);
+  await player.playItems([track("a"), track("b"), track("c")]);
+  player.toggleShuffle();
+  audios[0].currentTime = 22;
+  player.moveQueueItem(0, 2);
+  assert.equal(player.getSnapshot().queueIndex, 2);
+  assert.equal(audios[0].currentTime, 22);
+  const played = [];
+  await player.next(); played.push(player.getSnapshot().videoDetails.id);
+  await player.next(); played.push(player.getSnapshot().videoDetails.id);
+  assert.deepEqual(played.sort(), ["b", "c"]);
+  await player.next();
+  assert.equal(player.getSnapshot().trackState, "Paused");
 });
 
 test("a late old resolution cannot overwrite a newer selection", async (t) => {

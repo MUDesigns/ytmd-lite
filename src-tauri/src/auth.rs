@@ -97,14 +97,38 @@ fn migrate_auth_data_dir(dir: PathBuf, legacy: PathBuf) -> Result<PathBuf, Strin
     Ok(dir)
 }
 
+// Tauri cookie getters wait for WebView2 callbacks. Running them on the UI
+// thread deadlocks Windows and prevents later login windows from opening.
+async fn read_youtube_cookies(win: tauri::WebviewWindow) -> Result<Vec<(String, String)>, String> {
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let url = "https://music.youtube.com".parse().unwrap();
+        let mut cookies = win.cookies_for_url(url).unwrap_or_default();
+        if !cookies.iter().any(|c| c.name() == "SAPISID") {
+            cookies = win.cookies().map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|c| c.domain().map(|d| {
+                    let domain = d.trim_start_matches('.');
+                    domain == "youtube.com" || domain.ends_with(".youtube.com")
+                }).unwrap_or(false))
+                .collect();
+        }
+        Ok(cookies.iter().map(|c| (c.name().to_string(), c.value().to_string())).collect())
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await.map_err(|_| "Timed out reading YouTube session cookies".to_string())?
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
     // Cookie login posts to the local catalog API — make sure it's up.
     ensure_api(&app)?;
 
     if let Some(w) = app.get_webview_window("login") {
-        let _ = w.destroy();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        w.unminimize().map_err(|e| e.to_string())?;
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
     }
     if let Some(w) = app.get_webview_window("session-keeper") {
         let _ = w.destroy();
@@ -118,7 +142,7 @@ pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
     });
     let init_script = format!("window.__YTMD_LABELS__ = {labels};\n{LOGIN_INIT_JS}");
 
-    let _win = tauri::WebviewWindowBuilder::new(
+    let win = tauri::WebviewWindowBuilder::new(
         &app,
         "login",
         WebviewUrl::External(
@@ -136,10 +160,11 @@ pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
     .initialization_script(&init_script)
     .build()
     .map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
 
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        let yt_url: url::Url = "https://music.youtube.com".parse().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         let mut completed = false;
 
@@ -154,33 +179,13 @@ pub async fn open_login_window(app: AppHandle) -> Result<(), String> {
                 continue;
             }
 
-            let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
-            let cwin = win.clone();
-            let cyt = yt_url.clone();
-            let _ = app_clone.run_on_main_thread(move || {
-                if cwin.cookies_for_url(cyt.clone()).is_err() && cwin.cookies().is_err() {
-                    let _ = tx.send(Vec::new());
-                    return;
+            let found = match read_youtube_cookies(win.clone()).await {
+                Ok(cookies) => cookies,
+                Err(e) => {
+                    log::debug!("Login cookie read deferred: {e}");
+                    continue;
                 }
-                let mut cs = cwin.cookies_for_url(cyt).unwrap_or_default();
-                if !cs.iter().any(|c| c.name() == "SAPISID") {
-                    if let Ok(all) = cwin.cookies() {
-                        let yt: Vec<_> = all
-                            .into_iter()
-                            .filter(|c| c.domain().map(|d| d.contains("youtube.com")).unwrap_or(false))
-                            .collect();
-                        if yt.iter().any(|c| c.name() == "SAPISID") {
-                            cs = yt;
-                        }
-                    }
-                }
-                let pairs = cs
-                    .iter()
-                    .map(|c| (c.name().to_string(), c.value().to_string()))
-                    .collect();
-                let _ = tx.send(pairs);
-            });
-            let found = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default();
+            };
 
             let has_auth = found.iter().any(|(n, _)| n == "SAPISID");
             let done = found.iter().any(|(n, v)| n == "YTMD_DONE" && v == "1");
@@ -290,26 +295,8 @@ pub async fn rotate_session_cookies(app: AppHandle) -> Result<(), String> {
     );
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-    let yt_url: url::Url = "https://music.youtube.com".parse().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
-    let cwin = win.clone();
-    let _ = app.run_on_main_thread(move || {
-        let mut cs = cwin.cookies_for_url(yt_url).unwrap_or_default();
-        if !cs.iter().any(|c| c.name() == "SAPISID") {
-            if let Ok(all) = cwin.cookies() {
-                cs = all
-                    .into_iter()
-                    .filter(|c| c.domain().map(|d| d.contains("youtube.com")).unwrap_or(false))
-                    .collect();
-            }
-        }
-        let pairs = cs
-            .iter()
-            .map(|c| (c.name().to_string(), c.value().to_string()))
-            .collect();
-        let _ = tx.send(pairs);
-    });
-    let found = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default();
+    let found = read_youtube_cookies(win).await?;
+
     if !found.iter().any(|(name, value)| name == "SAPISID" && !value.is_empty()) {
         return Err("no auth cookies from session-keeper".into());
     }

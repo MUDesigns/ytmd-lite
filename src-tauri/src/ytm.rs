@@ -57,7 +57,9 @@ pub fn create_main_window(
 
     let _chrome = window
         .add_child(
-            tauri::webview::WebviewBuilder::new(CHROME_LABEL, chrome_url).auto_resize(),
+            tauri::webview::WebviewBuilder::new(CHROME_LABEL, chrome_url)
+                .disable_drag_drop_handler()
+                .auto_resize(),
             LogicalPosition::new(0.0, 0.0),
             LogicalSize::new(width, height),
         )
