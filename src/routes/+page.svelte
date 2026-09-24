@@ -131,7 +131,8 @@
   });
   let discordRpc = $state<DiscordRpcStatus>({ enabled: false, connected: false, lastError: null });
   let accentColor = $state(DEFAULT_ACCENT);
-  let player = $state<PlayerState>({ videoDetails: null, trackState: "Unknown", videoProgress: 0 });
+  // Player snapshots are replaced as a unit and share unchanged queue/metadata.
+  let player = $state.raw<PlayerState>({ videoDetails: null, trackState: "Unknown", videoProgress: 0 });
   let engine = $state<EngineStatus>({ signedIn: false, authVisible: false, ready: false });
   let authProfile = $state<string | null>(null);
   let configPath = $state("");

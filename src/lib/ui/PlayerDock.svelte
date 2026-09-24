@@ -35,7 +35,7 @@
   const duration = $derived(player.videoDetails?.durationSeconds ?? 0);
   const progress = $derived(player.videoProgress ?? 0);
   const progressPct = $derived(duration > 0 ? Math.min(100, (progress / duration) * 100) : 0);
-  const art = $derived(thumb(player.videoDetails));
+  const art = $derived(thumb(player.videoDetails, "", 80));
   const volume = $derived(player.volume ?? 100);
   const stateTag = $derived(
     failed ? "error" : buffering ? "buf" : playing ? "run" : player.videoDetails ? "stop" : "nil",
@@ -109,7 +109,7 @@
     <div class="side left">
       <div class="art">
         {#if art}
-          <img src={art} alt="" referrerpolicy="no-referrer" class:dim={buffering} />
+          <img src={art} alt="" decoding="async" referrerpolicy="no-referrer" class:dim={buffering} />
         {:else}
           <svg class="art-fallback" viewBox="0 0 24 24" aria-hidden="true"
             ><path

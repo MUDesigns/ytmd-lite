@@ -18,7 +18,8 @@
     onartist?: (artist: ArtistLink) => void;
   } = $props();
 
-  const img = $derived(thumb(item));
+  // Two device pixels per CSS pixel in either appearance.
+  const img = $derived(thumb(item, "", $codeTheme ? 64 : 256));
   const isMood = $derived(item.type === "mood" || !!item.color);
   const canPlay = $derived(
     !!item.videoId || item.type === "album" || item.type === "playlist" || !!item.playlistId || !!item.browseId,
@@ -65,7 +66,7 @@
       : undefined}
   >
     {#if img && !isMood}
-      <img src={img} alt="" loading="lazy" referrerpolicy="no-referrer" />
+      <img src={img} alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
     {:else if isMood}
       <span class="mood-label">{item.title.slice(0, 1)}</span>
     {:else}

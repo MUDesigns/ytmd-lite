@@ -8,9 +8,25 @@ const source = await readFile(new URL("../src/lib/api.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth } = await import(
+const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth, thumb, proxiedUrl } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
+
+test("small covers request bounded Google images without original-size upscaling", () => {
+  const source = "https://lh3.googleusercontent.com/cover=w1200-h1200-l90-rj?token=abc";
+  for (const size of [64, 80, 256]) {
+    const proxy = new URL(thumb({ thumbnails: [source] }, "", size));
+    assert.equal(proxy.searchParams.get("hq"), "0");
+    assert.equal(proxy.searchParams.get("url"), source.replace("w1200-h1200", `w${size}-h${size}`));
+  }
+  assert.equal(new URL(thumb({ thumbnails: [source] })).searchParams.get("hq"), "1", "large covers retain existing quality");
+  const unknown = "https://example.com/cover=w1200-h1200";
+  assert.equal(new URL(proxiedUrl(unknown, 64)).searchParams.get("url"), unknown);
+  for (const url of ["data:image/png;base64,abc", "blob:cover", "http://127.0.0.1:9847/imgproxy?url=cover"]) {
+    assert.equal(proxiedUrl(url, 64), url);
+  }
+  assert.equal(thumb(null, "fallback", 64), "fallback");
+});
 
 function mockApi(t, routes) {
   const calls = [];

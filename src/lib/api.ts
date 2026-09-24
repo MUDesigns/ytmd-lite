@@ -129,7 +129,7 @@ function pickThumbUrl(raw: Record<string, unknown>): string {
 }
 
 /** Route Google/YT thumbs through the local proxy (Referer from localhost is blocked). */
-export function proxiedUrl(url: string | null | undefined): string {
+export function proxiedUrl(url: string | null | undefined, size?: number): string {
   if (!url) return "";
   if (
     url.startsWith("data:") ||
@@ -139,7 +139,20 @@ export function proxiedUrl(url: string | null | undefined): string {
   ) {
     return url;
   }
-  return `${API_BASE}/imgproxy?hq=1&url=${encodeURIComponent(url)}`;
+  const bounded = size !== undefined && Number.isFinite(size) && size > 0;
+  if (bounded) {
+    // Preserve Google's crop/format suffix; only resize known thumbnail hosts.
+    // Other URLs keep their native variant, without the proxy's original-size upgrade.
+    try {
+      const parsed = new URL(url);
+      if (/^(?:lh\d+\.googleusercontent\.com|yt3\.(?:ggpht\.com|googleusercontent\.com))$/.test(parsed.hostname)) {
+        const pixels = Math.min(1024, Math.ceil(size));
+        parsed.pathname = parsed.pathname.replace(/=w\d+-h\d+/, `=w${pixels}-h${pixels}`);
+        url = parsed.href;
+      }
+    } catch { /* Let the existing proxy handle malformed URLs. */ }
+  }
+  return `${API_BASE}/imgproxy?hq=${bounded ? 0 : 1}&url=${encodeURIComponent(url)}`;
 }
 
 /** Map Kodama API item → MusicItem */
@@ -616,11 +629,11 @@ export function streamUrl(videoId: string) {
   return `${API_BASE}/audio-stream/${encodeURIComponent(videoId)}`;
 }
 
-export function thumb(item: { thumbnails?: string[] } | null | undefined, fallback = "") {
+export function thumb(item: { thumbnails?: string[] } | null | undefined, fallback = "", size?: number) {
   const list = item?.thumbnails;
   if (!list?.length) return fallback;
   const raw = list[list.length - 1] || list[0] || fallback;
-  return proxiedUrl(typeof raw === "string" ? raw : "");
+  return proxiedUrl(typeof raw === "string" ? raw : "", size);
 }
 
 export function loadRecentSearches(): string[] {

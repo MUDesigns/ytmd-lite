@@ -19,6 +19,60 @@ let instance = 0;
 const track = (videoId) => ({ videoId, title: videoId });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+test("progress snapshots reuse queue and metadata until their inputs change", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItems(Array.from({ length: 1000 }, (_, i) => track(`track-${i}`)));
+  const before = player.getSnapshot();
+  const started = performance.now();
+  let queueChanges = 0;
+  let metadataChanges = 0;
+  for (let i = 0; i < 2000; i++) {
+    audios[0].currentTime = i / 2;
+    const state = player.getSnapshot();
+    if (state.queue !== before.queue) queueChanges++;
+    if (state.videoDetails !== before.videoDetails) metadataChanges++;
+    assert.equal(state.videoProgress, i / 2);
+  }
+  t.diagnostic(`2000 snapshots / 1000 tracks: ${(performance.now() - started).toFixed(2)}ms; queue replacements=${queueChanges}; metadata replacements=${metadataChanges}`);
+  assert.equal(queueChanges, 0);
+  assert.equal(metadataChanges, 0);
+
+  await player.setVolume(42);
+  assert.equal(player.getSnapshot().queue, before.queue);
+  audios[0].duration = 240;
+  assert.equal(player.getSnapshot().videoDetails.durationSeconds, 240);
+  assert.equal(before.videoDetails.durationSeconds, 120);
+  player.playNext(track("inserted"));
+  assert.equal(before.queue.length, 1000, "published snapshots must stay unchanged");
+  assert.equal(player.getSnapshot().queue[1].videoId, "inserted");
+  await player.playQueueIndex(1);
+  assert.equal(player.getSnapshot().queue[0].selected, false);
+  assert.equal(player.getSnapshot().queue[1].selected, true);
+  assert.equal(player.getSnapshot().videoDetails.id, "inserted");
+  assert.equal(before.queue[0].selected, true);
+});
+
+test("progress ticks stay quiet while paused and resume with playback", async (t) => {
+  const { player, audios } = await setup(t);
+  await player.playItem(track("a"));
+  const tick = globalThis.setInterval.mock.calls.at(-1).arguments[0];
+  const updates = [];
+  const unsubscribe = player.subscribe(state => updates.push(state));
+  t.after(unsubscribe);
+  await player.playPause();
+  const pausedCount = updates.length;
+  tick();
+  tick();
+  assert.equal(updates.length, pausedCount);
+  await player.seek(12);
+  assert.equal(updates.at(-1).videoProgress, 12, "seeking while paused still publishes");
+  await player.playPause();
+  audios[0].currentTime = 13;
+  tick();
+  assert.equal(updates.at(-1).videoProgress, 13);
+  assert.equal(updates.at(-1).trackState, "Playing");
+});
+
 function mockStorage(t, value) {
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value });

@@ -146,10 +146,39 @@ function currentItem(): QueueItem | null {
   return queue[queueIndex];
 }
 
+// Queue edits replace the array. Progress ticks can share the published snapshot
+// until either the queue or its selection changes, avoiding O(queue.length) work.
+let snapshotQueueSource: QueueItem[] | null = null;
+let snapshotQueueIndex = -1;
+let snapshotQueue: QueueItem[] = [];
+let snapshotItem: QueueItem | null = null;
+let snapshotDuration = 0;
+let snapshotDetails: PlayerState["videoDetails"] = null;
+
 function buildState(trackState = "Unknown"): PlayerState {
   const item = currentItem();
   const a = audio;
   const duration = a && Number.isFinite(a.duration) ? Math.floor(a.duration) : 0;
+
+  if (snapshotQueueSource !== queue || snapshotQueueIndex !== queueIndex) {
+    snapshotQueueSource = queue;
+    snapshotQueueIndex = queueIndex;
+    snapshotQueue = queue.map((q, i) => ({ ...q, selected: i === queueIndex }));
+  }
+  if (snapshotItem !== item || snapshotDuration !== duration) {
+    snapshotItem = item;
+    snapshotDuration = duration;
+    snapshotDetails = item ? {
+      id: item.videoId,
+      title: item.title,
+      author: item.author || "",
+      album: item.album || "",
+      albumId: item.albumId,
+      channelId: item.channelId,
+      durationSeconds: duration,
+      thumbnails: item.thumbnails || [],
+    } : null;
+  }
 
   let resolved = trackState;
   if (playbackError) {
@@ -163,25 +192,14 @@ function buildState(trackState = "Unknown"): PlayerState {
   }
 
   return {
-    videoDetails: item
-      ? {
-          id: item.videoId,
-          title: item.title,
-          author: item.author || "",
-          album: item.album || "",
-          albumId: item.albumId,
-          channelId: item.channelId,
-          durationSeconds: duration || 0,
-          thumbnails: item.thumbnails || [],
-        }
-      : null,
+    videoDetails: snapshotDetails,
     trackState: resolved,
     videoProgress: loading || playbackError ? resumePosition : a?.currentTime ?? 0,
     playbackError: playbackError || undefined,
     volume,
     muted: a?.muted ?? false,
     likeStatus,
-    queue: queue.map((q, i) => ({ ...q, selected: i === queueIndex })),
+    queue: snapshotQueue,
     queueIndex,
     playlistId: "",
     shuffle: shuffleOn,
@@ -205,6 +223,8 @@ function sync(trackState?: string) {
 function startProgress() {
   if (progressTimer) return;
   progressTimer = setInterval(() => {
+    // Paused/error state changes and seeks already publish through sync().
+    if (!audio || audio.paused) return;
     const state = buildState(
       userPaused ? "Paused" : loading ? "Buffering" : "Unknown",
     );
