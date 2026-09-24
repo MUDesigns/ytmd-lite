@@ -45,7 +45,7 @@
   import { defaultWorkbenchFiles, loadWorkbenchFiles, workbenchFilename, viewLabels } from "$lib/workbench";
   import { readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
   import type { PaletteCommand } from "$lib/commands";
-  import { miniPlayerUpdate } from "$lib/mini-player";
+  import { miniPlayerUpdate, type MiniLikeRequest, type MiniLikeResult } from "$lib/mini-player";
 
   let panel = $state<Panel>("home");
   let paletteOpen = $state(false);
@@ -259,6 +259,19 @@
     (async () => {
       unsubs.push(await listen("mini-player-ready", () => { miniConnected = true; syncMiniPlayer(); }));
       unsubs.push(await listen("mini-player-closed", () => { miniConnected = false; }));
+      unsubs.push(await listen<MiniLikeRequest>("mini-player-like", async ({ payload }) => {
+        const track = playerCtl.getSnapshot().videoDetails;
+        const error = track?.id === payload.videoId
+          ? await toggleLikeFor(track.id, {
+              type: "song", id: track.id, videoId: track.id, title: track.title,
+              subtitle: track.author, thumbnails: track.thumbnails || [],
+            })
+          : "The song changed. Try again.";
+        syncMiniPlayer();
+        void emitTo("mini-player", "mini-player-like-result", {
+          requestId: payload.requestId, error,
+        } satisfies MiniLikeResult).catch(() => {});
+      }));
       try {
         lastfm = await invoke<LastFmStatus>("get_lastfm_status");
         discordRpc = await invoke<DiscordRpcStatus>("get_discord_rpc_status");
@@ -627,8 +640,11 @@
     }
   }
 
-  async function toggleLikeFor(videoId: string | undefined, meta?: MusicItem | null) {
+  const liking = new Set<string>();
+  async function toggleLikeFor(videoId: string | undefined, meta?: MusicItem | null): Promise<string | undefined> {
     if (!videoId) return;
+    if (liking.has(videoId)) return "A like update is already in progress.";
+    liking.add(videoId);
     const liked = likedIds.has(videoId);
     const rating = liked ? "INDIFFERENT" : "LIKE";
     try {
@@ -647,6 +663,9 @@
       statusMsg = liked ? "Removed from likes" : "Liked";
     } catch (e) {
       statusMsg = String(e);
+      return statusMsg;
+    } finally {
+      liking.delete(videoId);
     }
   }
 

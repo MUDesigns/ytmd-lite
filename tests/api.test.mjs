@@ -8,9 +8,36 @@ const source = await readFile(new URL("../src/lib/api.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth, thumb, proxiedUrl } = await import(
+const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth, thumb, proxiedUrl, loadPlaylistOptions, addTrackToPlaylist } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
+
+test("playlist chooser omits automatic, read-only and duplicate destinations", async t => {
+  mockApi(t, { "/library/playlists": { playlists: [
+    { playlistId: "LM", title: "Liked Songs" },
+    { playlistId: "VLPL-owned", title: "Mine" },
+    { playlistId: "PL-owned", title: "Duplicate" },
+    { playlistId: "PL-readonly", title: "Read only", isEditable: false },
+    { playlistId: "", title: "No id" },
+  ] } });
+  assert.deepEqual(await loadPlaylistOptions(), [{ playlistId: "PL-owned", title: "Mine" }]);
+});
+
+test("playlist additions send the captured track and propagate rejection", async t => {
+  let success = true;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(new URL(url).pathname, "/playlist/PL-target/add");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(init.body), { videoIds: ["song"], tracks: [{
+      videoId: "song", title: "Title", artists: "Artist", album: "Album", thumbnail: "cover",
+    }] });
+    return Response.json(success ? { ok: true } : { error: "Playlist is read-only" }, { status: success ? 200 : 400 });
+  });
+  const track = { id: "song", title: "Title", author: "Artist", album: "Album", thumbnails: ["cover"] };
+  await addTrackToPlaylist("PL-target", track);
+  success = false;
+  await assert.rejects(addTrackToPlaylist("PL-target", track), /read-only/);
+});
 
 test("small covers request bounded Google images without original-size upscaling", () => {
   const source = "https://lh3.googleusercontent.com/cover=w1200-h1200-l90-rj?token=abc";

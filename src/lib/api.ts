@@ -455,6 +455,33 @@ export async function likeSong(
   });
 }
 
+export type PlaylistOption = { playlistId: string; title: string };
+
+export async function loadPlaylistOptions(): Promise<PlaylistOption[]> {
+  const data = await api<{ playlists?: Array<PlaylistOption & { isEditable?: boolean }> }>("/library/playlists");
+  const seen = new Set<string>();
+  return (data.playlists || []).flatMap(p => {
+    const playlistId = p.playlistId?.replace(/^VL/, "");
+    if (!playlistId || playlistId === "LM" || p.isEditable === false || seen.has(playlistId)) return [];
+    seen.add(playlistId);
+    return [{ playlistId, title: p.title || "Untitled playlist" }];
+  });
+}
+
+export async function addTrackToPlaylist(playlistId: string, track: {
+  id: string; title: string; author?: string; album?: string; thumbnails?: string[];
+}) {
+  const result = await api<{ ok: boolean }>(`/playlist/${encodeURIComponent(playlistId)}/add`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ videoIds: [track.id], tracks: [{
+      videoId: track.id, title: track.title, artists: track.author || "",
+      album: track.album || "", thumbnail: track.thumbnails?.[0] || "",
+    }] }),
+  });
+  if (!result.ok) throw new Error("Could not add this song to the playlist.");
+}
+
 export async function setArtistSubscribed(
   browseId: string,
   subscribed: boolean,

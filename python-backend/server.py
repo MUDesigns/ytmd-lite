@@ -3073,7 +3073,10 @@ def playlist_add_tracks(playlist_id):
                 db.execute("UPDATE playlists SET updated_at=? WHERE playlist_id=?", (now, playlist_id))
                 db.commit()
             return jsonify({"ok": True})
-        get_ytmusic().add_playlist_items(playlist_id, video_ids)
+        result = get_ytmusic().add_playlist_items(playlist_id, video_ids)
+        status = result.get("status") if isinstance(result, dict) else result
+        if status != "STATUS_SUCCEEDED":
+            return jsonify({"error": "Could not add this song. The playlist may be read-only or already contain it."}), 400
         _purge_playlist_cache(playlist_id)
         return jsonify({"ok": True})
     except Exception as e:
