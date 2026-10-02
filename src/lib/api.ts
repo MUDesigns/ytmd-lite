@@ -222,6 +222,14 @@ export function mapItem(raw: Record<string, unknown>): MusicItem {
   };
 }
 
+export async function loadSharedSong(videoId: string): Promise<MusicItem> {
+  const data = await api<Record<string, unknown>>(`/song/meta/${encodeURIComponent(videoId)}`, {
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!data.title) throw new Error("This shared song is unavailable.");
+  return mapTrack({ ...data, videoId });
+}
+
 function mapTrack(t: Record<string, unknown>): MusicItem {
   return mapItem({
     type: "song",

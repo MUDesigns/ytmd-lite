@@ -8,6 +8,7 @@ Lightweight YouTube Music desktop client built with **Tauri 2** + **Svelte 5**. 
 - Google sign-in via a dedicated login webview (session cookies for the API)
 - Local Flask API on `:9847` (adapted from Kodama’s `python-backend`)
 - Player dock: queue, shuffle, repeat, like, audio output selection
+- Share songs from the player or song menu: copy a YTMD Lite, YouTube Music, or YouTube link
 - Last.fm now-playing / scrobble
 - Discord Rich Presence (optional)
 - Accent color picker
@@ -67,6 +68,12 @@ cp lastfm.secrets.json.example src-tauri/lastfm.secrets.json
 ```
 
 ## Develop
+
+Song sharing copies a link to the clipboard. `ytmd-lite://song/<videoId>` links
+open and play the song in YTMD Lite, bringing an existing instance to the front.
+Recipients need YTMD Lite installed to open player links. The Windows installer
+registers the link handler; macOS requires the bundled app installed in Applications.
+YouTube Music and YouTube links work in a browser.
 
 ```sh
 npm run tauri dev

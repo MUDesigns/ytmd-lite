@@ -33,7 +33,19 @@ pub fn run() {
     let rpc = RpcHub::new();
     let server = ServerProcess::new();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_window(ytm::WINDOW_LABEL) {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+
+    builder
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(
@@ -102,6 +114,11 @@ pub fn run() {
             auth::api_status,
         ])
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                app.deep_link().register_all()?;
+            }
             #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
             {
                 app.handle()

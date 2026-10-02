@@ -46,6 +46,9 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["ytmd-lite"] }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwMkEzRjMxMzE1NEZGNzAKUldSdy8xUXhNVDhxSU5scHFLQ1dobHMrT2lKTGg5VSs3Q01ubmJLNjRack5RVmhEa0o0WU9wSkIK",
       "endpoints": [

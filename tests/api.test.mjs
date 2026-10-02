@@ -8,9 +8,28 @@ const source = await readFile(new URL("../src/lib/api.ts", import.meta.url), "ut
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth, thumb, proxiedUrl, loadPlaylistOptions, addTrackToPlaylist } = await import(
+const { loadLibrary, mapItem, browseDetail, search, searchLibrary, validateAuth, thumb, proxiedUrl, loadPlaylistOptions, addTrackToPlaylist, loadSharedSong } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`
 );
+
+test("shared songs load playable metadata and report unavailable tracks", async t => {
+  let available = true;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(new URL(url).pathname, "/song/meta/dQw4w9WgXcQ");
+    assert.ok(init.signal instanceof AbortSignal);
+    return Response.json(available ? {
+      videoId: "dQw4w9WgXcQ", title: "Shared song", artists: "Artist", thumbnail: "cover",
+    } : { videoId: "dQw4w9WgXcQ", title: null });
+  });
+  const song = await loadSharedSong("dQw4w9WgXcQ");
+  assert.equal(song.type, "song");
+  assert.equal(song.videoId, "dQw4w9WgXcQ");
+  assert.equal(song.title, "Shared song");
+  assert.equal(song.subtitle, "Artist");
+  assert.deepEqual(song.thumbnails, ["cover"]);
+  available = false;
+  await assert.rejects(loadSharedSong("dQw4w9WgXcQ"), /unavailable/);
+});
 
 test("playlist chooser omits automatic, read-only and duplicate destinations", async t => {
   mockApi(t, { "/library/playlists": { playlists: [

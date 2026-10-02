@@ -1,6 +1,9 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { emitTo, listen } from "@tauri-apps/api/event";
+  import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+  import { shareDestinations, songShareUrl, sharedSongId, type ShareDestination } from "$lib/sharing";
   import { onMount, tick } from "svelte";
   import {
     browseDetail,
@@ -10,6 +13,7 @@
     loadArtistRadio,
     loadHome,
     loadLibrary,
+    loadSharedSong,
     loadRecentSearches,
     pushRecentSearch,
     resolveArtist,
@@ -167,7 +171,7 @@
   let detailItem = $state<MusicItem | null>(null);
   let likedIds = $state<Set<string>>(new Set());
   let subscribeBusy = $state(false);
-  let ctx = $state<{ open: boolean; x: number; y: number; item: MusicItem | null }>({
+  let ctx = $state<{ open: boolean; x: number; y: number; item: MusicItem | null; shareOnly?: boolean }>({
     open: false,
     x: 0,
     y: 0,
@@ -236,6 +240,31 @@
     workbenchFiles = loadWorkbenchFiles();
     sessions = readSessions();
     const unsubs: Array<() => void> = [];
+    let mounted = true;
+    let sharedRequest = 0;
+    const openSharedUrls = async (urls: string[]) => {
+      const videoId = urls.map(sharedSongId).find((id) => id !== null);
+      if (!videoId || !mounted) return;
+      const request = ++sharedRequest;
+      statusMsg = "Opening shared song…";
+      try {
+        const item = await loadSharedSong(videoId);
+        if (mounted && request === sharedRequest) await playFromUi(item);
+      } catch (error) {
+        if (mounted && request === sharedRequest) statusMsg = `Could not open shared song: ${String(error)}`;
+      }
+    };
+    void (async () => {
+      let receivedUrl = false;
+      const stop = await onOpenUrl((urls) => {
+        receivedUrl = true;
+        void openSharedUrls(urls);
+      });
+      if (!mounted) { stop(); return; }
+      unsubs.push(stop);
+      const urls = await getCurrent();
+      if (urls && !receivedUrl) void openSharedUrls(urls);
+    })().catch((error) => console.error("[sharing] Could not listen for song links", error));
 
     // GitHub Releases auto-update (no-op for unsigned local builds)
     void checkForAppUpdates();
@@ -390,6 +419,8 @@
     })();
 
     return () => {
+      mounted = false;
+      ++sharedRequest;
       cancelSearchRequest();
       ++browseRequest;
       unsubs.forEach((u) => u());
@@ -713,6 +744,32 @@
     ctx = { open: true, x: ev.clientX, y: ev.clientY, item };
   }
 
+  function openCurrentShare(event: MouseEvent) {
+    const track = player.videoDetails;
+    if (!track) return;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    ctx = {
+      open: true, x: rect.left, y: rect.bottom, shareOnly: true,
+      item: { type: "song", id: track.id, videoId: track.id, title: track.title,
+        subtitle: track.author, thumbnails: track.thumbnails || [] },
+    };
+  }
+
+  function shareActions(): MenuAction[] {
+    return shareDestinations.map(({ id, label }) => ({
+      id: `share-${id}`, label: `Copy ${label} link`, icon: "link",
+    }));
+  }
+
+  async function copySongLink(videoId: string, destination: ShareDestination) {
+    try {
+      await writeText(songShareUrl(videoId, destination));
+      statusMsg = `${shareDestinations.find((d) => d.id === destination)?.label} link copied`;
+    } catch (error) {
+      statusMsg = `Could not copy song link: ${String(error)}`;
+    }
+  }
+
   function contextActions(item: MusicItem | null): MenuAction[] {
     if (!item) return [];
     const isSong = !!(item.videoId && (item.type === "song" || !item.browseId));
@@ -750,6 +807,7 @@
       });
     }
     if (isSong && item.videoId) {
+      actions.push({ id: "share-separator", label: "", separator: true }, ...shareActions());
       actions.push({ id: "sep1", label: "", separator: true });
       actions.push({
         id: "like",
@@ -764,6 +822,11 @@
     const item = ctx.item;
     ctx = { ...ctx, open: false };
     if (!item) return;
+    const destination = shareDestinations.find((d) => id === `share-${d.id}`);
+    if (destination && item.videoId) {
+      await copySongLink(item.videoId, destination.id);
+      return;
+    }
     if (id === "play") await playFromUi(item);
     else if (id === "shuffle") await shufflePlayItem(item);
     else if (id === "queue") await queueItem(item, false);
@@ -1682,6 +1745,7 @@
   <PlayerDock
     {player}
     onmini={openMiniPlayer}
+    onshare={openCurrentShare}
     onqueue={() => setPanel("queue")}
     onlike={toggleLikeCurrent}
     onartist={openArtist}
@@ -1695,7 +1759,7 @@
     open={ctx.open}
     x={ctx.x}
     y={ctx.y}
-    actions={contextActions(ctx.item)}
+    actions={ctx.shareOnly ? shareActions() : contextActions(ctx.item)}
     onselect={onContextSelect}
     onclose={() => (ctx = { ...ctx, open: false })}
   />

@@ -12,12 +12,14 @@
     onlike,
     onartist,
     onmini,
+    onshare,
   }: {
     player: PlayerState;
     onqueue?: () => void;
     onlike?: () => void;
     onartist?: (artist: ArtistLink) => void;
     onmini?: () => void;
+    onshare?: (event: MouseEvent) => void;
   } = $props();
 
   const playing = $derived(player.trackState === "Playing");
@@ -88,6 +90,9 @@
         <span class="path">ytmd://playback</span>
       {/if}
     </div>
+    <button class="term-btn ghost" title="Share song" aria-label="Share song" aria-haspopup="menu" disabled={!player.videoDetails?.id} onclick={(event) => onshare?.(event)}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18 16a3 3 0 0 0-2.4 1.2l-6.7-3.9a3.3 3.3 0 0 0 0-2.6l6.7-3.9A3 3 0 1 0 15 5c0 .2 0 .5.1.7L8.4 9.6a3 3 0 1 0 0 4.8l6.7 3.9A3 3 0 1 0 18 16z" /></svg>
+    </button>
     <button class="term-btn ghost" title="Open mini player" aria-label="Open mini player" onclick={() => onmini?.()}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 4h18v8h-2V6H5v12h6v2H3V4zm10 10h9v7h-9v-7zm2 2v3h5v-3h-5z" /></svg>
     </button>

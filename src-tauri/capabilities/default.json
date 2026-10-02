@@ -32,6 +32,8 @@
     "core:webview:allow-set-webview-focus",
     "core:tray:default",
     "opener:default",
+    "deep-link:default",
+    "clipboard-manager:allow-write-text",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
