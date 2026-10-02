@@ -123,6 +123,23 @@
     }
   }
   let statusMsg = $state("Ready");
+  let windowsLinkRegistration = $state(false);
+  let registeringPlayerLinks = $state(false);
+  let playerLinkRegistrationMessage = $state("");
+
+  async function registerPlayerLinks() {
+    if (registeringPlayerLinks) return;
+    registeringPlayerLinks = true;
+    playerLinkRegistrationMessage = "";
+    try {
+      await invoke("register_player_link_handler");
+      playerLinkRegistrationMessage = "Windows will now open YTMD Lite song links in this app.";
+    } catch (error) {
+      playerLinkRegistrationMessage = `Could not register player links: ${String(error)}`;
+    } finally {
+      registeringPlayerLinks = false;
+    }
+  }
   let lastfm = $state<LastFmStatus>({
     enabled: false,
     authenticated: false,
@@ -236,6 +253,7 @@
   }
 
   onMount(() => {
+    windowsLinkRegistration = /Windows/i.test(navigator.userAgent);
     loadCodeTheme();
     workbenchFiles = loadWorkbenchFiles();
     sessions = readSessions();
@@ -1689,6 +1707,19 @@
           </p>
           <AccentPicker value={accentColor} onchange={onAccentChange} />
         </section>
+
+        {#if windowsLinkRegistration}
+          <section class="settings-block">
+            <h2 class="settings-label">Song links</h2>
+            <p class="hint muted">Choose this running version of YTMD Lite to open shared player links in Windows.</p>
+            <button class="btn" disabled={registeringPlayerLinks} onclick={registerPlayerLinks}>
+              {registeringPlayerLinks ? "Registering…" : "Use this app for YTMD Lite links"}
+            </button>
+            {#if playerLinkRegistrationMessage}
+              <p class="hint" role="status">{playerLinkRegistrationMessage}</p>
+            {/if}
+          </section>
+        {/if}
 
         <section class="settings-block">
           <h2 class="settings-label">Discord</h2>

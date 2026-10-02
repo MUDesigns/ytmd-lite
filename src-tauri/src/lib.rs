@@ -23,6 +23,20 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, GlobalShortcutExt, ShortcutState};
 
+#[tauri::command]
+fn register_player_link_handler(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        app.deep_link().register("ytmd-lite").map_err(|error| error.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Registering player links here is only supported on Windows.".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = env_logger::try_init();
@@ -67,6 +81,7 @@ pub fn run() {
         })
         .manage(server)
         .invoke_handler(tauri::generate_handler![
+            register_player_link_handler,
             mini_player::open_mini_player,
             mini_player::close_mini_player,
             mini_player::pin_mini_player,

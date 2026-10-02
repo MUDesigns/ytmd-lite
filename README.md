@@ -74,6 +74,8 @@ open and play the song in YTMD Lite, bringing an existing instance to the front.
 Recipients need YTMD Lite installed to open player links. The Windows installer
 registers the link handler; macOS requires the bundled app installed in Applications.
 YouTube Music and YouTube links work in a browser.
+On Windows, Settings → Song links → **Use this app for YTMD Lite links**
+registers the running build as your link handler, including a development build.
 
 ```sh
 npm run tauri dev
