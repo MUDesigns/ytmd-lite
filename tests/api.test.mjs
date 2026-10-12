@@ -127,6 +127,37 @@ test("Library exposes Liked Songs even when no regular playlists exist", async (
   assert.equal(calls.at(-1), "/playlist/LM");
 });
 
+test("Library removes repeated collections while preserving order and metadata", async (t) => {
+  mockApi(t, {
+    "/library/playlists": { playlists: [
+      { playlistId: "VLLM", title: "Liked Songs", count: "12" },
+      { playlistId: "LM", title: "Liked Songs" },
+      { playlistId: "PL-other", title: "Road trip" },
+      { playlistId: "PL-other", title: "Road trip" },
+    ] },
+    "/library/albums": { albums: [
+      { browseId: "MPRE-album", title: "Album", year: "2026" },
+      { browseId: "MPRE-album", title: "Album" },
+    ] },
+    "/library/artists": { artists: [
+      { browseId: "MPLAUCAEoWdsa-kHYZj3Ut-BfNyw", artist: "nothing,nowhere.", thumbnail: "cover" },
+      { browseId: "MPLAUCAEoWdsa-kHYZj3Ut-BfNyw", artist: "nothing,nowhere." },
+      { browseId: "UC-other", artist: "Another artist" },
+    ] },
+  });
+  const library = await loadLibrary();
+  assert.deepEqual(library.shelves.map(shelf => shelf.items.map(item => item.title)), [
+    ["Liked Songs", "Road trip"], ["Album"], ["nothing,nowhere.", "Another artist"],
+  ]);
+  assert.equal(library.shelves[0].items[0].subtitle, "12 tracks");
+  assert.equal(library.shelves[1].items[0].subtitle, "2026");
+  assert.deepEqual(library.shelves[2].items[0].thumbnails, ["cover"]);
+  for (const shelf of library.shelves) {
+    const keys = shelf.items.map(item => item.id + item.title);
+    assert.equal(new Set(keys).size, keys.length, "Shelf rendering keys must be unique");
+  }
+});
+
 test("Library preserves existing Liked Songs metadata without adding a duplicate", async (t) => {
   mockApi(t, {
     ...libraryRoutes,

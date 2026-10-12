@@ -372,9 +372,9 @@ export async function loadLibrary(): Promise<BrowseResult> {
   ]);
 
   const shelves: MusicItem[] = [];
-  const plItems = (playlists.playlists || []).map((p) =>
+  const plItems = uniqueItems((playlists.playlists || []).map((p) =>
     mapItem({ ...p, type: "playlist", title: p.title }),
-  );
+  ));
   // Liked Songs has its own API and may be absent from library playlists.
   // Load its tracks only when opened, using the backend's special LM route.
   if (!plItems.some((p) => p.playlistId === "LM")) {
@@ -389,7 +389,7 @@ export async function loadLibrary(): Promise<BrowseResult> {
       items: plItems,
     });
   }
-  const alItems = (albums.albums || []).map((a) => mapItem({ ...a, type: "album" }));
+  const alItems = uniqueItems((albums.albums || []).map((a) => mapItem({ ...a, type: "album" })));
   if (alItems.length) {
     shelves.push({
       type: "shelf",
@@ -399,13 +399,13 @@ export async function loadLibrary(): Promise<BrowseResult> {
       items: alItems,
     });
   }
-  const arItems = (artists.artists || []).map((a) =>
+  const arItems = uniqueItems((artists.artists || []).map((a) =>
     mapItem({
       ...a,
       type: "artist",
       title: a.artist || a.title,
     }),
-  );
+  ));
   if (arItems.length) {
     shelves.push({
       type: "shelf",
