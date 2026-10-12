@@ -31,6 +31,21 @@ test("shared songs load playable metadata and report unavailable tracks", async 
   await assert.rejects(loadSharedSong("dQw4w9WgXcQ"), /unavailable/);
 });
 
+test("shared playlists load their tracks and report unavailable or private playlists", async t => {
+  let available = true;
+  t.mock.method(globalThis, "fetch", async url => {
+    assert.equal(new URL(url).pathname, "/playlist/PL-shared");
+    return Response.json(available ? {
+      title: "Shared playlist", tracks: [{ videoId: "dQw4w9WgXcQ", title: "Shared track" }],
+    } : { error: "Playlist unavailable or private" });
+  });
+  const playlist = await browseDetail({ playlistId: "PL-shared", title: "Shared playlist" });
+  assert.equal(playlist.title, "Shared playlist");
+  assert.equal(playlist.items[0].videoId, "dQw4w9WgXcQ");
+  available = false;
+  await assert.rejects(browseDetail({ playlistId: "PL-shared" }), /unavailable or private/);
+});
+
 test("playlist chooser omits automatic, read-only and duplicate destinations", async t => {
   mockApi(t, { "/library/playlists": { playlists: [
     { playlistId: "LM", title: "Liked Songs" },

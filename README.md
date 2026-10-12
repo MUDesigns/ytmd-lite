@@ -74,6 +74,13 @@ Song sharing copies a link to the clipboard. YTMD Lite share links use
 apps can make them clickable. The share page attempts to open the song in YTMD
 Lite and offers an **Open in YTMD Lite** button if the browser requires a click.
 It also offers YouTube Music and YouTube links for listening in a browser.
+Playlists have a **Share playlist** button on their detail page and copy-link
+options in their context menu. Playlist links use `?playlist=<playlistId>` on
+the same share page and `ytmd-lite://playlist/<playlistId>` to open the playlist
+in the app without starting playback. Liked Songs cannot be shared because it
+is specific to the signed-in account. Recipients can only access private
+playlists if their account has permission; make a playlist public or unlisted
+to share it with others.
 Existing `ytmd-lite://song/<videoId>` links still open and play the song in
 YTMD Lite, bringing an existing instance to the front.
 Recipients need YTMD Lite installed to open player links. The Windows installer

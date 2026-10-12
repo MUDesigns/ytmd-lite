@@ -3,7 +3,7 @@
   import { emitTo, listen } from "@tauri-apps/api/event";
   import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-  import { shareDestinations, songShareUrl, sharedSongId, type ShareDestination } from "$lib/sharing";
+  import { shareDestinations, songShareUrl, sharedSongId, playlistShareUrl, sharedPlaylistId, shareablePlaylistId, type ShareDestination } from "$lib/sharing";
   import { onMount, tick } from "svelte";
   import {
     browseDetail,
@@ -261,9 +261,17 @@
     let mounted = true;
     let sharedRequest = 0;
     const openSharedUrls = async (urls: string[]) => {
-      const videoId = urls.map(sharedSongId).find((id) => id !== null);
-      if (!videoId || !mounted) return;
+      const url = urls.find((value) => sharedSongId(value) || sharedPlaylistId(value));
+      if (!url || !mounted) return;
       const request = ++sharedRequest;
+      const playlistId = sharedPlaylistId(url);
+      if (playlistId) {
+        statusMsg = "Opening shared playlist…";
+        await openItem({ type: "playlist", id: playlistId, playlistId,
+          title: "Shared playlist", thumbnails: [] });
+        return;
+      }
+      const videoId = sharedSongId(url)!;
       statusMsg = "Opening shared song…";
       try {
         const item = await loadSharedSong(videoId);
@@ -282,7 +290,7 @@
       unsubs.push(stop);
       const urls = await getCurrent();
       if (urls && !receivedUrl) void openSharedUrls(urls);
-    })().catch((error) => console.error("[sharing] Could not listen for song links", error));
+    })().catch((error) => console.error("[sharing] Could not listen for shared links", error));
 
     // GitHub Releases auto-update (no-op for unsigned local builds)
     void checkForAppUpdates();
@@ -779,12 +787,21 @@
     }));
   }
 
-  async function copySongLink(videoId: string, destination: ShareDestination) {
+  function openPlaylistShare(event: MouseEvent) {
+    if (!shareablePlaylistId(detailItem)) return;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    ctx = { open: true, x: rect.left, y: rect.bottom, shareOnly: true, item: detailItem };
+  }
+
+  async function copyItemLink(item: MusicItem, destination: ShareDestination) {
     try {
-      await writeText(songShareUrl(videoId, destination));
+      const playlistId = shareablePlaylistId(item);
+      await writeText(playlistId
+        ? playlistShareUrl(playlistId, destination)
+        : songShareUrl(item.videoId || "", destination));
       statusMsg = `${shareDestinations.find((d) => d.id === destination)?.label} link copied`;
     } catch (error) {
-      statusMsg = `Could not copy song link: ${String(error)}`;
+      statusMsg = `Could not copy ${item.type === "playlist" ? "playlist" : "song"} link: ${String(error)}`;
     }
   }
 
@@ -824,8 +841,10 @@
         icon: "person",
       });
     }
-    if (isSong && item.videoId) {
+    if ((isSong && item.videoId) || shareablePlaylistId(item)) {
       actions.push({ id: "share-separator", label: "", separator: true }, ...shareActions());
+    }
+    if (isSong && item.videoId) {
       actions.push({ id: "sep1", label: "", separator: true });
       actions.push({
         id: "like",
@@ -841,8 +860,8 @@
     ctx = { ...ctx, open: false };
     if (!item) return;
     const destination = shareDestinations.find((d) => id === `share-${d.id}`);
-    if (destination && item.videoId) {
-      await copySongLink(item.videoId, destination.id);
+    if (destination) {
+      await copyItemLink(item, destination.id);
       return;
     }
     if (id === "play") await playFromUi(item);
@@ -1358,6 +1377,12 @@
                 <span class="material-symbols-outlined">playlist_add</span>
                 Add to queue
               </button>
+              {#if shareablePlaylistId(detailItem)}
+                <button class="btn" aria-haspopup="menu" onclick={openPlaylistShare}>
+                  <span class="material-symbols-outlined">share</span>
+                  Share playlist
+                </button>
+              {/if}
               {#if detailData?.kind === "artist"}
                 <button class="btn" disabled={radioBusy || loading} onclick={() => startArtistRadio()}>
                   <span class="material-symbols-outlined">radio</span>
