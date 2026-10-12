@@ -205,3 +205,112 @@ test("incoming playlist links open detail without playing and supersede a pendin
   await context.openSharedUrls(["ytmd-lite://playlist/LM"]);
   assert.equal(opened.length, 1);
 });
+
+function navigationContext(panel = "library") {
+  const context = {
+    panel, detailFrom: panel, detailItem: null, detail: null, detailData: null, detailHistory: [],
+    loading: false, loadError: null, ctx: { open: false }, statusMsg: "", browseRequest: 0,
+    mounted: true, sharedRequest: 0, sharedSongId, sharedPlaylistId, shareablePlaylistId,
+    searchQuery: "", searchData: null, cancelSearchRequest: () => {},
+    viewLabels: { home: "Home", library: "Library", detail: "Detail", search: "Search" },
+    refreshPanel: async () => {},
+  };
+  const functions = ["isCollection", "openItem", "setPanel", "goBack", "openSharedUrls"];
+  runInNewContext(functions.map(pageFunction).join("\n"), context);
+  const backAction = pageSource.match(/class="back" onclick=\{([^}]+)\}/)[1];
+  context.back = runInNewContext(`(${backAction})`, context);
+  return context;
+}
+
+test("Back from a shared playlist restores the previous playlist before returning to Library", async () => {
+  const context = navigationContext();
+  const owned = { type: "playlist", id: "PL-owned", playlistId: "PL-owned", title: "My playlist" };
+  await context.openItem(owned);
+  const ownedData = { title: "My playlist", items: [{ videoId }], shelves: [] };
+  context.detailData = ownedData;
+  await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+  assert.equal(context.detail.playlistId, playlistId);
+  await context.back();
+  assert.equal(context.panel, "detail");
+  assert.equal(context.detailItem, owned);
+  assert.equal(context.detailData, ownedData);
+  await context.back();
+  assert.equal(context.panel, "library");
+});
+
+test("a shared playlist response arriving after Back cannot replace the restored page", async t => {
+  for (const fails of [false, true]) {
+    await t.test(fails ? "private playlist error" : "successful playlist load", async () => {
+      const context = navigationContext();
+      const owned = { type: "playlist", id: "PL-owned", playlistId: "PL-owned", title: "My playlist" };
+      await context.openItem(owned);
+      const ownedData = { title: "My playlist", items: [{ videoId }], shelves: [] };
+      context.detailData = ownedData;
+      let resolveShared, rejectShared;
+      context.browseDetail = () => new Promise((resolve, reject) => {
+        resolveShared = resolve;
+        rejectShared = reject;
+      });
+      context.refreshLiked = async () => {};
+      context.engine = { signedIn: true };
+      runInNewContext(pageFunction("refreshPanel"), context);
+      const refresh = context.refreshPanel;
+      let sharedLoad;
+      context.refreshPanel = target => (sharedLoad = refresh(target));
+      await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+      assert.equal(context.loading, true);
+      await context.back();
+      assert.equal(context.detailData, ownedData);
+      assert.equal(context.loading, false);
+      if (fails) rejectShared(new Error("Playlist unavailable or private"));
+      else resolveShared({ title: "Someone else's playlist", items: [], shelves: [] });
+      await sharedLoad;
+      assert.equal(context.detailData, ownedData);
+      assert.equal(context.loadError, null);
+      assert.equal(context.detailItem, owned);
+    });
+  }
+});
+
+test("Back from a failed shared playlist returns to the original view, including a fresh launch", async () => {
+  for (const panel of ["home", "library", "search"]) {
+    const context = navigationContext(panel);
+    await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+    context.loadError = "Playlist unavailable or private";
+    await context.back();
+    assert.equal(context.panel, panel);
+    assert.equal(context.loading, false);
+    assert.equal(context.loadError, null);
+  }
+});
+
+test("Back retraces multiple shared collections, avoids repeated-link loops, and clears history on navigation", async () => {
+  const context = navigationContext();
+  const owned = { type: "playlist", id: "VLPL-owned", playlistId: "PL-owned", title: "My playlist" };
+  await context.openItem(owned);
+  await context.openSharedUrls(["ytmd-lite://playlist/PL-owned"]);
+  assert.equal(context.detailHistory.length, 0);
+  await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+  await context.openSharedUrls(["ytmd-lite://playlist/PL-other"]);
+  await context.back();
+  assert.equal(context.detail.playlistId, playlistId);
+  await context.back();
+  assert.equal(context.detail.playlistId, "PL-owned");
+  await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+  await context.setPanel("home");
+  assert.equal(context.detailHistory.length, 0);
+  await context.openSharedUrls(["ytmd-lite://playlist/PL-other"]);
+  await context.back();
+  assert.equal(context.panel, "home");
+});
+
+test("Back reloads a previous collection that was still loading when the shared link opened", async () => {
+  const context = navigationContext();
+  const requests = [];
+  context.refreshPanel = async () => requests.push(context.detail.playlistId);
+  await context.openItem({ type: "playlist", id: "PL-owned", playlistId: "PL-owned", title: "My playlist" });
+  await context.openSharedUrls([`ytmd-lite://playlist/${playlistId}`]);
+  await context.back();
+  assert.deepEqual(requests, ["PL-owned", playlistId, "PL-owned"]);
+  assert.equal(context.panel, "detail");
+});

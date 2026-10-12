@@ -186,6 +186,9 @@
   const explorerShelves = $derived(panel === "detail" ? detailData?.shelves || [] : panel === "library" ? libraryData?.shelves || [] : panel === "explore" ? exploreData?.shelves || [] : panel === "search" ? searchData?.shelves || [] : panel === "home" ? homeData?.shelves || [] : []);
   let detailFrom = $state<Panel>("home");
   let detailItem = $state<MusicItem | null>(null);
+  let detailHistory = $state<Array<{
+    item: MusicItem; target: DetailTarget; data: BrowseResult | null; error: string | null;
+  }>>([]);
   let likedIds = $state<Set<string>>(new Set());
   let subscribeBusy = $state(false);
   let ctx = $state<{ open: boolean; x: number; y: number; item: MusicItem | null; shareOnly?: boolean }>({
@@ -522,7 +525,10 @@
     ctx = { ...ctx, open: false };
     panel = next;
     if (next === "search" && searchQuery.trim() && !searchData) void runSearch();
-    if (next !== "detail") detailFrom = next;
+    if (next !== "detail") {
+      detailFrom = next;
+      detailHistory = [];
+    }
     statusMsg = next === "settings" ? "Settings" : `Opened ${viewLabels[next]}`;
     if (next === "settings") {
       void probeAuth();
@@ -531,6 +537,26 @@
     if (next === "home" || next === "explore" || next === "library") {
       void refreshPanel(next);
     }
+  }
+
+  async function goBack() {
+    const previous = detailHistory.pop();
+    if (!previous) {
+      await setPanel(detailFrom === "detail" ? "home" : detailFrom);
+      return;
+    }
+    // Invalidate the shared playlist's pending load before restoring its parent.
+    cancelSearchRequest();
+    ++browseRequest;
+    ctx = { ...ctx, open: false };
+    loading = false;
+    loadError = previous.error;
+    detailItem = previous.item;
+    detail = previous.target;
+    detailData = previous.data;
+    panel = "detail";
+    statusMsg = `Opened ${previous.data?.title || previous.item.title}`;
+    if (!previous.data && !previous.error) void refreshPanel("detail");
   }
 
   async function refreshLiked() {
@@ -567,7 +593,18 @@
   async function openItem(item: MusicItem) {
     // Art / title click: open detail for collections; only bare songs play.
     if (isCollection(item)) {
-      if (panel !== "detail") detailFrom = panel;
+      if (panel !== "detail") {
+        detailFrom = panel;
+        detailHistory = [];
+      } else if (detailItem && detail) {
+        const playlistId = shareablePlaylistId(item);
+        const sameCollection = item.id === detailItem.id ||
+          (playlistId && playlistId === shareablePlaylistId(detailItem));
+        if (!sameCollection) {
+          detailHistory.push({ item: detailItem, target: detail, data: detailData, error: loadError });
+        }
+      }
+      ctx = { ...ctx, open: false };
       detailItem = item;
       detail = {
         browseId: item.browseId,
@@ -1311,7 +1348,7 @@
 
     {#if panel === "detail"}
       <div class="browse">
-        <button class="back" onclick={() => setPanel(detailFrom || "home")}>
+        <button class="back" onclick={goBack}>
           <span class="material-symbols-outlined">arrow_back</span>
           Back
         </button>
