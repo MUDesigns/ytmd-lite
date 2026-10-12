@@ -1,0 +1,29 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: oklch(92% 0.01 260);
+  background: oklch(19% 0.008 260);
+  --accent: oklch(82% 0.08 260);
+  --on-accent: oklch(24% 0.03 260);
+  --muted: oklch(75% 0.01 260);
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100svh; display: grid; align-items: center; }
+main { width: min(100%, 38rem); margin-inline: auto; padding: 3rem 1.5rem; }
+.brand { margin: 0 0 2.5rem; font-size: 0.875rem; font-weight: 650; letter-spacing: 0.04em; color: var(--muted); }
+h1 { font-size: 2.5rem; font-weight: 650; letter-spacing: -0.035em; line-height: 1.15; margin: 0 0 1rem; }
+p { line-height: 1.6; }
+#status { margin-bottom: 2rem; }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+.primary { display: inline-block; padding: 0.875rem 1.25rem; border-radius: 0.5rem; background: var(--accent); color: var(--on-accent); font-weight: 650; text-decoration: none; }
+.primary:hover { text-decoration: underline; }
+.primary:active { opacity: 0.85; }
+.hint { color: var(--muted); font-size: 0.875rem; margin: 1rem 0 2rem; max-width: 48ch; }
+.alternatives { font-size: 0.9375rem; }
+.alternatives a { display: inline-block; }
+footer { margin-top: 4rem; font-size: 0.875rem; }
+@media (prefers-color-scheme: light) {
+  :root { color: oklch(25% 0.015 260); background: oklch(98% 0.005 260); --accent: oklch(42% 0.14 260); --on-accent: oklch(98% 0.005 260); --muted: oklch(46% 0.015 260); }
+}
+@media (max-width: 380px) { h1 { font-size: 2rem; } }

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="description" content="Open a shared song in YTMD Lite or listen in your browser.">
+    <meta property="og:title" content="A song for you · YTMD Lite">
+    <meta property="og:description" content="Listen in YTMD Lite, YouTube Music, or YouTube.">
+    <title>Shared song · YTMD Lite</title>
+    <link rel="stylesheet" href="./style.css">
+    <script src="./share.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <p class="brand">YTMD Lite</p>
+      <h1 id="heading">A song for you.</h1>
+      <p id="status" role="status">Choose where to listen to this shared song.</p>
+      <div id="destinations" hidden>
+        <a id="player" class="primary">Open in YTMD Lite</a>
+        <p class="hint">If the app doesn't open, use the button above and allow your browser to open YTMD Lite.</p>
+        <p class="alternatives">Listen in your browser: <a id="music">YouTube Music</a> <span aria-hidden="true">·</span> <a id="youtube">YouTube</a></p>
+      </div>
+      <noscript><p>Enable JavaScript to open this shared song.</p></noscript>
+      <footer><a href="https://github.com/MUDesigns/ytmd-lite/releases/latest">Get YTMD Lite</a></footer>
+    </main>
+  </body>
+</html>

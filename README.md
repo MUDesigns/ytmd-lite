@@ -69,13 +69,26 @@ cp lastfm.secrets.json.example src-tauri/lastfm.secrets.json
 
 ## Develop
 
-Song sharing copies a link to the clipboard. `ytmd-lite://song/<videoId>` links
-open and play the song in YTMD Lite, bringing an existing instance to the front.
+Song sharing copies a link to the clipboard. YTMD Lite share links use
+`https://mudesigns.github.io/ytmd-lite/?song=<videoId>` so Discord and other chat
+apps can make them clickable. The share page attempts to open the song in YTMD
+Lite and offers an **Open in YTMD Lite** button if the browser requires a click.
+It also offers YouTube Music and YouTube links for listening in a browser.
+Existing `ytmd-lite://song/<videoId>` links still open and play the song in
+YTMD Lite, bringing an existing instance to the front.
 Recipients need YTMD Lite installed to open player links. The Windows installer
 registers the link handler; macOS requires the bundled app installed in Applications.
 YouTube Music and YouTube links work in a browser.
 On Windows, Settings → Song links → **Use this app for YTMD Lite links**
 registers the running build as your link handler, including a development build.
+
+The share page is a standalone static site in `share-site/`. Before distributing
+a build with HTTPS share links, enable **Settings → Pages → Build and deployment
+→ Source → GitHub Actions** in the GitHub repository, then run the **Share link
+page** workflow (or push its files to `main`). The workflow deploys only the share
+page, not the desktop app. Verify the public share URL opens successfully before
+releasing. To test locally, run `python -m http.server 8080 --directory share-site`
+and open `http://localhost:8080/?song=dQw4w9WgXcQ`.
 
 ```sh
 npm run tauri dev

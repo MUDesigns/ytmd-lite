@@ -10,7 +10,7 @@ const videoIdPattern = /^[A-Za-z0-9_-]{11}$/;
 export function songShareUrl(videoId: string, destination: ShareDestination): string {
   if (!videoIdPattern.test(videoId)) throw new Error("This song has no valid YouTube video ID.");
   switch (destination) {
-    case "player": return `ytmd-lite://song/${videoId}`;
+    case "player": return `https://mudesigns.github.io/ytmd-lite/?song=${videoId}`;
     case "music": return `https://music.youtube.com/watch?v=${videoId}`;
     case "youtube": return `https://www.youtube.com/watch?v=${videoId}`;
   }
