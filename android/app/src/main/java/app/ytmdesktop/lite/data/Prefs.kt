@@ -15,6 +15,7 @@ object Prefs {
     const val DEFAULT_ACCENT = "#a8c7fa"
     private const val RECENT_MAX = 8
     private const val HEARD_MAX = 5000
+    private const val RECENT_TRACKS_MAX = 50
 
     private lateinit var prefs: SharedPreferences
     private val stringList = ListSerializer(String.serializer())
@@ -73,6 +74,18 @@ object Prefs {
     fun rememberHeard(videoId: String) {
         val list = heard().filter { it != videoId } + videoId
         writeList("heard", list.takeLast(HEARD_MAX))
+    }
+
+    private val queueItemList = ListSerializer(QueueItem.serializer())
+
+    /** Recently played tracks with metadata, newest first (Android Auto's Recently played tab). */
+    fun recentTracks(): List<QueueItem> =
+        runCatching { Json.decodeFromString(queueItemList, prefs.getString("recentTracks", "[]") ?: "[]") }.getOrDefault(emptyList())
+
+    @Synchronized
+    fun rememberRecentTrack(item: QueueItem) {
+        val next = (listOf(item.copy(autoplay = false)) + recentTracks().filter { it.videoId != item.videoId }).take(RECENT_TRACKS_MAX)
+        prefs.edit { putString("recentTracks", Json.encodeToString(queueItemList, next)) }
     }
 
     fun getString(key: String): String? = prefs.getString(key, null)

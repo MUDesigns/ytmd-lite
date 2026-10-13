@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.ytmdesktop.lite.backend.Backend
+import app.ytmdesktop.lite.data.Account
 import app.ytmdesktop.lite.data.Api
 import app.ytmdesktop.lite.data.ArtistLink
 import app.ytmdesktop.lite.data.BrowseResult
@@ -92,6 +93,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val isSearching: Boolean get() = panel == Panel.search
 
     init {
+        viewModelScope.launch { Account.likedIds.collect { likedIds = it } }
         viewModelScope.launch {
             when (val s = Backend.state.first { it !is Backend.State.Starting }) {
                 is Backend.State.Ready -> {
@@ -112,7 +114,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         homeData = null
         exploreData = null
         libraryData = null
-        likedIds = emptySet()
+        Account.changed()
         if (panel == Panel.detail) {
             detailStack.clear()
             panel = Panel.home
@@ -125,7 +127,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         signedIn = auth.valid == true && auth.type != "local"
         guest = auth.valid == true && auth.type == "local"
         authProfile = auth.profile
-        if (signedIn) likedIds = Api.getLikedIds()
+        Account.setSignedIn(signedIn)
+        if (signedIn) Account.loadLikes()
         loadPanel(panel, force = true)
     }
 
@@ -384,16 +387,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             statusMsg = "Sign in to like songs"
             return
         }
-        val like = videoId !in likedIds
-        likedIds = if (like) likedIds + videoId else likedIds - videoId
         viewModelScope.launch {
             try {
-                Api.likeSong(videoId, like, item)
-                statusMsg = if (like) "liked" else "removed like"
-            } catch (e: Exception) {
-                likedIds = if (like) likedIds - videoId else likedIds + videoId
-                report(e)
-            }
+                statusMsg = if (Account.toggleLike(videoId, item)) "liked" else "removed like"
+            } catch (e: Exception) { report(e) }
         }
     }
 
@@ -423,7 +420,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             Api.logout()
             signedIn = false
             authProfile = null
-            likedIds = emptySet()
+            Account.changed()
             homeData = null; libraryData = null; exploreData = null
             statusMsg = "signed out"
             loadPanel(panel, force = true)
