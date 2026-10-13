@@ -27,6 +27,29 @@ The Android app does not include Discord Rich Presence, the mini player (the med
 notification and lock screen replace it), audio-output selection, the auto-updater,
 or saved listening sessions.
 
+## Android Auto
+
+`PlaybackService` is a Media3 `MediaLibraryService`, so Android Auto shows the app as a media source
+(declared by `res/xml/automotive_app_desc.xml`). It uses the phone's sign-in, backend, and player.
+The browse tree lives in `playback/LibraryTree.kt`:
+
+- Four tabs: **Home**, **Library** (needs a Google account), **Explore** (the phone's Discover), and
+  **Recent** (the last 50 tracks played on this device).
+- Albums, playlists, artists, and moods open as folders. Picking a song queues the rest of its shelf or
+  list after it; playlists and albums also have a **Shuffle** row and artists an **Artist radio** row.
+- In-car search and voice ("play … on YTMD Lite"): the top search result decides what plays: a song
+  plus its radio, an album/playlist, or an artist radio.
+- Now Playing adds **Like** (signed-in accounts; synced with the phone UI through `data/Account.kt`) and
+  an **Autoplay** toggle. These buttons also appear in the phone's media notification.
+- Auto only loads browse artwork from `content://` URIs, so `playback/ArtworkProvider.kt` serves cached
+  copies of YouTube thumbnails (Google image hosts only).
+
+To try it without a car, install the [Desktop Head Unit](https://developer.android.com/training/cars/testing/dhu)
+and enable Android Auto's developer settings. Debug and sideloaded builds also need **Unknown sources**
+turned on in those settings.
+
+Android Automotive OS (cars with Google built in) is not supported.
+
 ## Build
 
 Requirements:
