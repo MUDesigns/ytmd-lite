@@ -117,4 +117,11 @@ jobs:
         if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$RELEASE_TAG" android/dist/*.apk --clobber
+        run: |
+          # Android-only releases have no desktop build to create the draft release first.
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --draft --target "$GITHUB_SHA" \
+              --title "YTMD Lite $RELEASE_TAG (Android)" \
+              --notes "Android-only update. Install \`YTMD-Lite_${VERSION}_android.apk\`; desktop installers are in the latest full release. Built from commit $GITHUB_SHA."
+          fi
+          gh release upload "$RELEASE_TAG" android/dist/*.apk --clobber

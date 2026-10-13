@@ -53,9 +53,12 @@ Builds include `arm64-v8a` (phones) and `x86_64` (emulators).
 
 [`.github/workflows/android.yml`](../.github/workflows/android.yml) builds the APK on pull requests
 and branch pushes that touch `android/` or `python-backend/` (download it from the run's
-**ytmd-lite-android** artifact). On `main` and `vX.Y.Z` tags, `release.yml` calls it with the
-release version and attaches `YTMD-Lite_<version>_android.apk` to the GitHub release before
-the release is published.
+**ytmd-lite-android** artifact). On `main`, `release.yml` first detects what changed: desktop
+paths (`src/`, `src-tauri/`, …) build the Windows app, `android/` builds the APK, and
+`python-backend/` builds both, since the APK bundles it. Both apps share one release version.
+An Android-only change gets its own release containing just the APK, which is never marked
+Latest (the desktop auto-updater reads the Latest release). `vX.Y.Z` tags, changes to
+`release.yml`, and manual runs (with a target choice) build both.
 
 Release APKs are signed when these repository secrets exist; otherwise CI builds a
 debug-signed APK (named `…_android-debug.apk`), which cannot update a release install:

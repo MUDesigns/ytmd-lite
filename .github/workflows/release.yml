@@ -7,12 +7,90 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      target:
+        description: Apps to build
+        type: choice
+        options: [all, desktop, android]
+        default: all
 
 permissions:
   contents: write
 
 jobs:
-  publish:
+  changes:
+    # Decide which apps this push affects, and fix the release version for all of them.
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.targets.outputs.desktop }}
+      android: ${{ steps.targets.outputs.android }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            desktop:
+              - "src/**"
+              - "src-tauri/**"
+              - "static/**"
+              - "scripts/**"
+              - "tests/**"
+              - "package.json"
+              - "package-lock.json"
+              - "svelte.config.js"
+              - "vite.config.js"
+              - "tsconfig.json"
+              - "python-backend/**"
+            android:
+              # The APK bundles python-backend, so backend changes ship in both apps.
+              - "android/**"
+              - "python-backend/**"
+              - ".github/workflows/android.yml"
+            workflow:
+              - ".github/workflows/release.yml"
+
+      - name: Choose apps
+        id: targets
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          TARGET: ${{ inputs.target }}
+          DESKTOP: ${{ steps.filter.outputs.desktop }}
+          ANDROID: ${{ steps.filter.outputs.android }}
+          WORKFLOW: ${{ steps.filter.outputs.workflow }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            desktop=$([ "$TARGET" != "android" ] && echo true || echo false)
+            android=$([ "$TARGET" != "desktop" ] && echo true || echo false)
+          elif [ "$REF_TYPE" = "tag" ] || [ "$WORKFLOW" = "true" ]; then
+            # Explicit version tags and release pipeline changes build everything.
+            desktop=true
+            android=true
+          else
+            desktop=${DESKTOP:-false}
+            android=${ANDROID:-false}
+          fi
+          echo "desktop=$desktop" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "### Release targets" >> "$GITHUB_STEP_SUMMARY"
+          echo "desktop: $desktop · android: $android" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set release version
+        id: version
+        if: steps.targets.outputs.desktop == 'true' || steps.targets.outputs.android == 'true'
+        run: node scripts/release-version.mjs
+
+  desktop:
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -21,9 +99,6 @@ jobs:
             args: ""
             backend_name: ytmd-backend-x86_64-pc-windows-msvc.exe
     runs-on: ${{ matrix.platform }}
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,7 +136,20 @@ jobs:
 
       - name: Set release version
         id: version
-        run: node scripts/release-version.mjs
+        shell: bash
+        env:
+          VERSION: ${{ needs.changes.outputs.version }}
+          TAG: ${{ needs.changes.outputs.tag }}
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = 'src-tauri/tauri.conf.json';
+          const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+          j.version = process.env.VERSION;
+          fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Write Last.fm secrets
         shell: bash
@@ -147,30 +235,43 @@ jobs:
           updaterJsonPreferNsis: true
 
   android:
-    needs: publish
+    needs: [changes, desktop]
+    # Runs whether or not the desktop build was needed, but never after it failed.
+    if: >-
+      always() && needs.changes.outputs.android == 'true' &&
+      (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
     uses: ./.github/workflows/android.yml
     with:
-      version: ${{ needs.publish.outputs.version }}
-      release-tag: ${{ needs.publish.outputs.tag }}
+      version: ${{ needs.changes.outputs.version }}
+      release-tag: ${{ needs.changes.outputs.tag }}
     secrets: inherit
 
   finalize:
-    # Publish only after every platform's assets are on the draft release.
-    needs: [publish, android]
+    # Publish only after every built app's assets are on the draft release.
+    needs: [changes, desktop, android]
+    if: >-
+      always() &&
+      (needs.desktop.result == 'success' || needs.android.result == 'success') &&
+      needs.desktop.result != 'failure' && needs.desktop.result != 'cancelled' &&
+      needs.android.result != 'failure' && needs.android.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.publish.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.publish.outputs.version }}
+          RELEASE_TAG: ${{ needs.changes.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.changes.outputs.version }}
+          DESKTOP_BUILT: ${{ needs.desktop.result == 'success' }}
         run: |
-          # A slower older build must not replace a newer updater release.
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name) || { echo "Could not check the current stable release"; exit 1; }
-          latest=${latest#v}
           make_latest=false
-          newest=$(printf '%s\n' "$latest" "$RELEASE_VERSION" | sort -V | tail -n1)
-          if [ "$RELEASE_VERSION" != "$latest" ] && [ "$newest" = "$RELEASE_VERSION" ]; then
-            make_latest=true
+          # The desktop auto-updater reads releases/latest/download/latest.json, so only a release
+          # with desktop installers may become Latest — and a slower older build must not replace a newer one.
+          if [ "$DESKTOP_BUILT" = "true" ]; then
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name) || { echo "Could not check the current stable release"; exit 1; }
+            latest=${latest#v}
+            newest=$(printf '%s\n' "$latest" "$RELEASE_VERSION" | sort -V | tail -n1)
+            if [ "$RELEASE_VERSION" != "$latest" ] && [ "$newest" = "$RELEASE_VERSION" ]; then
+              make_latest=true
+            fi
           fi
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false "--latest=$make_latest"
