@@ -35,7 +35,6 @@ class LoginActivity : ComponentActivity() {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.userAgentString = USER_AGENT
             cookies.setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
@@ -57,6 +56,7 @@ class LoginActivity : ComponentActivity() {
             addView(hint, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         })
+        BrowserIdentity.apply(web)
         web.loadUrl(LOGIN_URL)
     }
 
@@ -85,7 +85,7 @@ class LoginActivity : ComponentActivity() {
     private fun submit(cookie: String, dsid: String) {
         lifecycleScope.launch {
             try {
-                Api.cookieLogin(cookie, USER_AGENT, dsid.ifEmpty { null })
+                Api.cookieLogin(cookie, BACKEND_USER_AGENT, dsid.ifEmpty { null })
                 setResult(RESULT_OK)
                 finish()
             } catch (e: Exception) {
@@ -101,8 +101,8 @@ class LoginActivity : ComponentActivity() {
     }
 
     companion object {
-        // Desktop Chrome UA: Google rejects sign-in from user agents marked as embedded WebViews.
-        const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        // The backend talks to music.youtube.com as desktop web, like the desktop app (auth.rs).
+        const val BACKEND_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         private const val LOGIN_URL =
             "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F"
     }

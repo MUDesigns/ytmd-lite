@@ -76,6 +76,6 @@ is shared with the desktop build. Locally, the same `YTMD_KEYSTORE`, `YTMD_KEYST
 ## Notes
 
 - First launch takes a few seconds while Python starts; the status line shows `API …` until ready.
-- Google may occasionally reject sign-in inside embedded browsers; retrying usually works.
+- Google blocks sign-in from embedded WebViews ("This browser or app may not be secure"). `auth/BrowserIdentity.kt` makes the sign-in WebView present itself consistently as mobile Chrome (no `X-Requested-With` header, no WebView markers in the user agent or client hints, a `window.chrome` object). If Google changes its checks, start there.
 - Stream resolution runs without a PO token. If YouTube starts requiring one for the clients
   NewPipeExtractor uses, playback falls back to the backend's yt-dlp path, which is slower.
