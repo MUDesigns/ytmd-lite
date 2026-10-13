@@ -21,6 +21,9 @@ jobs:
             args: ""
             backend_name: ytmd-backend-x86_64-pc-windows-msvc.exe
     runs-on: ${{ matrix.platform }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -134,6 +137,7 @@ jobs:
             Custom YouTube Music desktop client (Tauri 2).
 
             Windows installers include the Python API backend.
+            The Android APK (`YTMD-Lite_<version>_android.apk`) bundles the same backend.
             Built from commit ${{ github.sha }}.
 
             Signed installers and latest.json are available through the auto-updater.
@@ -142,16 +146,31 @@ jobs:
           args: ${{ matrix.args }}
           updaterJsonPreferNsis: true
 
+  android:
+    needs: publish
+    uses: ./.github/workflows/android.yml
+    with:
+      version: ${{ needs.publish.outputs.version }}
+      release-tag: ${{ needs.publish.outputs.tag }}
+    secrets: inherit
+
+  finalize:
+    # Publish only after every platform's assets are on the draft release.
+    needs: [publish, android]
+    runs-on: ubuntu-latest
+    steps:
       - name: Publish complete release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ needs.publish.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.publish.outputs.version }}
         run: |
           # A slower older build must not replace a newer updater release.
-          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq .tag_name
-          if ($LASTEXITCODE -ne 0) { throw "Could not check the current stable release" }
-          $makeLatest = ([version]$env:RELEASE_VERSION -gt [version]($latest -replace '^v', '')).ToString().ToLowerInvariant()
-          gh release edit $env:RELEASE_TAG --draft=false --prerelease=false "--latest=$makeLatest"
-          if ($LASTEXITCODE -ne 0) { throw "Could not publish the release" }
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name) || { echo "Could not check the current stable release"; exit 1; }
+          latest=${latest#v}
+          make_latest=false
+          newest=$(printf '%s\n' "$latest" "$RELEASE_VERSION" | sort -V | tail -n1)
+          if [ "$RELEASE_VERSION" != "$latest" ] && [ "$newest" = "$RELEASE_VERSION" ]; then
+            make_latest=true
+          fi
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false "--latest=$make_latest"

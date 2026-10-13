@@ -1,0 +1,120 @@
+name: android
+
+on:
+  pull_request:
+    paths:
+      - "android/**"
+      - "python-backend/**"
+      - ".github/workflows/android.yml"
+  push:
+    branches-ignore:
+      - main # main builds run through release.yml
+    paths:
+      - "android/**"
+      - "python-backend/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version (X.Y.Z); written to tauri.conf.json, which the app reads
+        type: string
+        required: false
+      release-tag:
+        description: Upload the APK to this (draft) GitHub release
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Chaquopy compiles the shared python-backend with a matching host Python.
+      - name: Setup Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK platform
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
+
+      - name: Set release version
+        if: env.VERSION != ''
+        run: |
+          node -e "
+          const fs = require('fs');
+          const p = 'src-tauri/tauri.conf.json';
+          const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+          j.version = process.env.VERSION;
+          fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+
+      - name: Write Last.fm secrets
+        env:
+          LASTFM_SECRETS_JSON: ${{ secrets.LASTFM_SECRETS_JSON }}
+        run: |
+          if [ -n "$LASTFM_SECRETS_JSON" ]; then
+            printf '%s' "$LASTFM_SECRETS_JSON" > src-tauri/lastfm.secrets.json
+          fi
+
+      - name: Decode signing key
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ytmd-release.jks"
+            echo "keystore=$RUNNER_TEMP/ytmd-release.jks" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; building a debug-signed APK."
+          fi
+
+      - name: Build APK
+        working-directory: android
+        env:
+          YTMD_BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
+          YTMD_KEYSTORE: ${{ steps.signing.outputs.keystore }}
+          YTMD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          YTMD_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          YTMD_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          if [ -n "$YTMD_KEYSTORE" ]; then task=assembleRelease; dir=release; suffix=""; else task=assembleDebug; dir=debug; suffix="-debug"; fi
+          ./gradlew "$task" --no-daemon --stacktrace
+          version=$(node -p "require('../src-tauri/tauri.conf.json').version")
+          mkdir -p dist
+          cp "app/build/outputs/apk/$dir/"*.apk "dist/YTMD-Lite_${version}_android${suffix}.apk"
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytmd-lite-android
+          path: android/dist/*.apk
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$RELEASE_TAG" android/dist/*.apk --clobber

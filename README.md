@@ -13,6 +13,7 @@ Lightweight YouTube Music desktop client built with **Tauri 2** + **Svelte 5**. 
 - Discord Rich Presence (optional)
 - Accent color picker
 - Auto-update from [GitHub Releases](https://github.com/MUDesigns/ytmd-lite/releases)
+- Android app ([`android/`](android/README.md)) with the same look, sharing the Python backend
 
 ## Requirements
 
@@ -142,7 +143,8 @@ If backend shutdown fails, installation is deferred. Development builds skip upd
 ytmd-lite/
   src/                 # Svelte UI
   src-tauri/           # Rust / Tauri shell
-  python-backend/      # ytmusicapi Flask API (from Kodama)
+  python-backend/      # ytmusicapi Flask API (from Kodama), shared with Android
+  android/             # Android app (Kotlin / Compose) — see android/README.md
   scripts/             # icon + tooling
   .github/workflows/   # release + updater
 ```

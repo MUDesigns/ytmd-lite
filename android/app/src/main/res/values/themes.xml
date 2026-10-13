@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose draws everything; this only sets the dark IDE surface for the launch window. -->
+    <style name="Theme.YtmdLite" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:statusBarColor">@color/surface_lowest</item>
+        <item name="android:navigationBarColor">@color/surface_lowest</item>
+    </style>
+
+    <color name="surface">#0F131A</color>
+    <color name="surface_lowest">#0A0D12</color>
+</resources>

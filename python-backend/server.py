@@ -230,7 +230,10 @@ def diag():
 # When frozen as a PyInstaller --onefile bundle store all user data in a
 # platform-appropriate location so uninstallers can clean it up cleanly.
 # In dev mode, keep data next to server.py for convenience.
-if getattr(sys, 'frozen', False):
+# Embedded hosts (the Android app) pass a writable app-private directory instead.
+if os.environ.get('YTMD_DATA_DIR'):
+    _base_dir = os.environ['YTMD_DATA_DIR']
+elif getattr(sys, 'frozen', False):
     if sys.platform == 'win32':
         # Windows: %LOCALAPPDATA%\dev.kodama.music
         _data_root = os.environ.get('LOCALAPPDATA', os.path.dirname(sys.executable))
