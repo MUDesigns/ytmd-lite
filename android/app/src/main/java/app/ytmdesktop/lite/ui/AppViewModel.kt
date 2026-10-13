@@ -107,6 +107,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** A (possibly different) Google account was confirmed: drop everything loaded for the old one. */
+    fun onAccountChanged() {
+        homeData = null
+        exploreData = null
+        libraryData = null
+        likedIds = emptySet()
+        if (panel == Panel.detail) {
+            detailStack.clear()
+            panel = Panel.home
+        }
+        refreshAuth()
+    }
+
     fun refreshAuth() = viewModelScope.launch {
         val auth = Api.validateAuth()
         signedIn = auth.valid == true && auth.type != "local"

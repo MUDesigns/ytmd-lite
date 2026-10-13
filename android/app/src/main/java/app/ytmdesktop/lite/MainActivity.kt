@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
     private val login = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (it.resultCode == RESULT_OK) {
             vm.statusMsg = "signed in"
-            vm.refreshAuth()
+            vm.onAccountChanged()
         }
     }
 
