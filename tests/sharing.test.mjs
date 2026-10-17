@@ -161,6 +161,8 @@ test("playlist share button and context menu copy playlist URLs for all destinat
   const context = {
     detailItem: item, ctx: { open: false, item }, statusMsg: "", radioBusy: false, likedIds: new Set(),
     shareablePlaylistId, playlistShareUrl, songShareUrl,
+    // Offline download entries in the menu are covered by tests/offline.test.mjs.
+    collectionKeyFor: () => null, isDownloaded: () => false, $offline: { downloads: {} }, pct: () => 0,
     shareDestinations: [{ id: "player", label: "YTMD Lite" }, { id: "music", label: "YouTube Music" }, { id: "youtube", label: "YouTube" }],
     writeText: async value => copied.push(value),
   };

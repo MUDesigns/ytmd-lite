@@ -24,6 +24,8 @@ data class MusicItem(
     val artistLinks: List<ArtistLink>? = null,
     val album: String? = null,
     val albumId: String? = null,
+    /** Set on items built from the offline library; `items` then holds the downloaded tracks. */
+    val offlineKey: String? = null,
 ) {
     val isCollection: Boolean
         get() = type == ItemType.album || type == ItemType.playlist || type == ItemType.artist || type == ItemType.mood
@@ -57,7 +59,24 @@ data class DetailTarget(
     val playlistId: String? = null,
     val title: String? = null,
     val params: String? = null,
+    /** Show a downloaded collection from disk instead of fetching it. */
+    val offlineKey: String? = null,
 )
+
+/** A playlist, album, artist's top songs, or saved queue kept for offline listening. */
+@Serializable
+data class OfflineCollection(
+    val key: String,
+    val kind: String,
+    val id: String,
+    val title: String,
+    val subtitle: String? = null,
+    val thumbnail: String? = null,
+    val addedAt: Long = 0,
+    val tracks: List<QueueItem> = emptyList(),
+) {
+    val videoIds: List<String> get() = tracks.map { it.videoId }
+}
 
 data class PlaylistOption(val playlistId: String, val title: String)
 
@@ -73,6 +92,19 @@ data class QueueItem(
     val albumId: String? = null,
     val channelId: String? = null,
     val autoplay: Boolean = false,
+)
+
+fun QueueItem.toMusicItem(): MusicItem = MusicItem(
+    type = ItemType.song,
+    id = videoId,
+    title = title,
+    subtitle = author,
+    thumbnails = thumbnails,
+    videoId = videoId,
+    album = album,
+    albumId = albumId,
+    artistBrowseId = channelId,
+    artistLinks = channelId?.let { listOf(ArtistLink(author.split(",").first().trim(), it)) },
 )
 
 fun MusicItem.toQueueItem(): QueueItem? {

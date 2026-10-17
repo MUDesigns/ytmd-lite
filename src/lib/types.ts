@@ -4,6 +4,7 @@ export type Panel =
   | "explore"
   | "library"
   | "queue"
+  | "downloads"
   | "detail"
   | "lastfm"
   | "settings";
@@ -30,6 +31,8 @@ export type MusicItem = {
   /** Primary artist channel (UC…) when known */
   artistBrowseId?: string;
   artistLinks?: ArtistLink[];
+  /** Set on items built from the offline library; `items` then holds the downloaded tracks. */
+  offlineKey?: string;
 };
 
 export type BrowseResult = {
@@ -118,4 +121,61 @@ export type DetailTarget = {
   playlistId?: string;
   title?: string;
   params?: string;
+  /** Show a downloaded collection from disk instead of fetching it. */
+  offlineKey?: string;
+};
+
+export type OfflineSong = {
+  videoId: string;
+  title?: string;
+  artists?: string;
+  artistBrowseId?: string;
+  artistLinks?: ArtistLink[];
+  album?: string;
+  albumBrowseId?: string;
+  thumbnail?: string;
+  duration?: string | number;
+  pinned?: boolean;
+  downloadedAt?: number;
+  size?: number;
+};
+
+export type OfflineCollectionKind = "playlist" | "album" | "artist" | "queue";
+
+export type OfflineCollection = {
+  key: string;
+  kind: OfflineCollectionKind;
+  id: string;
+  title?: string;
+  subtitle?: string;
+  thumbnail?: string;
+  addedAt?: number;
+  videoIds: string[];
+  tracks: OfflineSong[];
+  done: number;
+  failed: number;
+  total: number;
+  size: number;
+};
+
+export type DownloadEntry = {
+  status: "queued" | "downloading" | "error";
+  progress: number;
+  title?: string;
+  error?: string;
+};
+
+export type DownloadStatus = {
+  downloads: Record<string, DownloadEntry>;
+  generation: number;
+  active: number;
+  queued: number;
+  failed: number;
+};
+
+export type OfflineLibrary = DownloadStatus & {
+  songs: OfflineSong[];
+  collections: OfflineCollection[];
+  totalBytes: number;
+  dir: string;
 };

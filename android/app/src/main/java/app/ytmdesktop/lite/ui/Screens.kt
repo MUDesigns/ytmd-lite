@@ -31,7 +31,15 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.DownloadDone
+import androidx.compose.material.icons.outlined.DownloadForOffline
+import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.DragIndicator
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.OfflinePin
+import androidx.compose.material.icons.outlined.Replay
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.MusicNote
@@ -53,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -80,8 +89,10 @@ import app.ytmdesktop.lite.data.Prefs
 import app.ytmdesktop.lite.data.QueueItem
 import app.ytmdesktop.lite.data.SearchFilter
 import app.ytmdesktop.lite.data.Sharing
+import app.ytmdesktop.lite.data.toMusicItem
 import app.ytmdesktop.lite.data.toQueueItem
 import app.ytmdesktop.lite.lastfm.LastFm
+import app.ytmdesktop.lite.playback.Downloads
 import app.ytmdesktop.lite.ui.components.AccentPicker
 import app.ytmdesktop.lite.ui.components.ArtistLinksText
 import app.ytmdesktop.lite.ui.components.Artwork
@@ -205,8 +216,14 @@ private fun AuthBanner(onSignIn: () -> Unit, onGuest: (() -> Unit)?) {
 
 @Composable
 private fun ErrorRetry(vm: AppViewModel, host: Host, error: String, retry: () -> Unit) {
+    val offline by Downloads.state.collectAsState()
+    val hint = Downloads.isOfflineError(error) && offline.songs.isNotEmpty()
     Callout(error, error = true)
-    IdeButton(if (vm.signedIn) "Retry" else "Sign in") { if (vm.signedIn) retry() else host.signIn() }
+    if (hint) Callout("You appear to be offline. Downloaded music is available in Downloads.", modifier = Modifier.padding(top = 8.dp))
+    FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        IdeButton(if (vm.signedIn) "Retry" else "Sign in") { if (vm.signedIn) retry() else host.signIn() }
+        if (hint) IdeButton("Open downloads", icon = Icons.Outlined.DownloadForOffline, primary = true) { vm.showPanel(Panel.downloads) }
+    }
     Spacer(Modifier.height(12.dp))
 }
 
@@ -232,6 +249,7 @@ fun PanelContent(vm: AppViewModel, host: Host, actions: ItemActions, searchFocus
                 Panel.search -> searchPanel(vm, host, actions)
                 Panel.detail -> detailPanel(vm, host, actions)
                 Panel.queue -> queuePanel(vm, host)
+                Panel.downloads -> downloadsPanel(vm, host, actions)
                 Panel.settings -> item { SettingsPanel(vm, host) }
                 Panel.lastfm -> item { LastFmPanel(host) }
                 else -> browsePanel(vm, host, actions)
@@ -249,6 +267,9 @@ private fun LazyListScope.browsePanel(vm: AppViewModel, host: Host, actions: Ite
                 IdeButton("Play all", icon = Icons.Filled.PlayArrow, primary = true, enabled = !vm.loading && vm.exploreData?.items?.isNotEmpty() == true) {
                     vm.exploreData?.items?.let { vm.playItems(it, 0) }
                 }
+            }
+            if (vm.panel == Panel.library) {
+                IdeButton("Downloads", icon = Icons.Outlined.DownloadForOffline) { vm.showPanel(Panel.downloads) }
             }
             IconBtn(Icons.Outlined.Refresh, "Refresh", enabled = !vm.loading) { vm.refreshPanel() }
         }
@@ -306,10 +327,14 @@ private fun LazyListScope.detailPanel(vm: AppViewModel, host: Host, actions: Ite
     val tracks = data?.items.orEmpty()
     if (tracks.isNotEmpty()) {
         itemsIndexed(tracks, key = { i, t -> "track-$i-${t.id}" }) { i, track ->
+            val offline by Downloads.state.collectAsState()
+            val pending = track.videoId?.let { offline.progress[it] }?.takeIf { it.downloading || it.queued }
             val inner = @Composable {
                 TrackRow(
                     i, track,
                     liked = track.videoId != null && track.videoId in vm.likedIds,
+                    downloaded = track.videoId != null && track.videoId in offline.downloadedIds,
+                    downloadPercent = pending?.percent?.toInt(),
                     onPlay = { if (track.videoId != null) vm.playItems(tracks, i) else vm.openItem(track) },
                     onLike = { vm.toggleLike(track.videoId, track.toQueueItem()) },
                     onMenu = { host.showItemMenu(track) },
@@ -370,6 +395,36 @@ private fun DetailHero(vm: AppViewModel, host: Host, data: BrowseResult?, item: 
             IdeButton("Add to queue", icon = Icons.AutoMirrored.Outlined.PlaylistAdd, enabled = enabled) {
                 if (item != null) vm.queueItem(item) else data?.items?.let { vm.player.addToQueue(it) }
             }
+            val key = Downloads.keyFor(item)
+            if (item != null && key != null) {
+                val offline by Downloads.state.collectAsState()
+                val progress = offline.collectionProgress(key)
+                var confirm by remember(key) { mutableStateOf(false) }
+                val busy = progress != null && progress.third > 0
+                val label = when {
+                    confirm -> "Remove download?"
+                    progress == null -> "Download"
+                    busy -> "Downloading ${progress.first}/${progress.second}"
+                    progress.first < progress.second -> "${progress.first}/${progress.second} downloaded"
+                    else -> "Downloaded"
+                }
+                IdeButton(
+                    label,
+                    icon = when {
+                        progress == null -> Icons.Outlined.Download
+                        busy -> Icons.Outlined.Downloading
+                        else -> Icons.Outlined.DownloadDone
+                    },
+                    active = progress != null,
+                    enabled = enabled && !busy,
+                ) {
+                    when {
+                        progress == null -> vm.downloadItem(item)
+                        !confirm -> confirm = true
+                        else -> { confirm = false; vm.removeDownload(item) }
+                    }
+                }
+            }
             Sharing.shareablePlaylistId(item)?.let { pid ->
                 IdeButton("Share playlist", icon = Icons.Outlined.Share) { host.sharePlaylist(pid) }
             }
@@ -392,6 +447,7 @@ private fun LazyListScope.queuePanel(vm: AppViewModel, host: Host) {
     val state = vm.player.state
     item {
         PageHead("Queue") {
+            IdeButton("Download", icon = Icons.Outlined.Download, enabled = state.queue.isNotEmpty()) { vm.downloadQueue() }
             IdeButton("Clear", enabled = state.queue.isNotEmpty()) {
                 vm.player.clearQueue()
                 vm.statusMsg = "Queue cleared"
@@ -455,9 +511,123 @@ private fun QueueRow(vm: AppViewModel, host: Host, index: Int, q: QueueItem, sel
             )
         }
         if (q.autoplay) Muted("auto", style = Type.tiny)
+        val offline by Downloads.state.collectAsState()
+        if (q.videoId in offline.downloadedIds) Icon(Icons.Outlined.OfflinePin, "Available offline", Modifier.size(15.dp), tint = c.primary)
         Text("${index + 1}", style = Type.small, color = c.muted)
         IconBtn(Icons.Outlined.MoreVert, "More", size = 32.dp, iconSize = 18.dp) { host.showSongMenu(q) }
         IconBtn(Icons.Outlined.Delete, "Remove", size = 32.dp, iconSize = 17.dp) { vm.player.removeQueueItem(index) }
+    }
+}
+
+// ── Downloads ────────────────────────────────────────────────────────────────
+
+private fun LazyListScope.downloadsPanel(vm: AppViewModel, host: Host, actions: ItemActions) {
+    item {
+        val offline by Downloads.state.collectAsState()
+        PageHead("Downloads") {
+            if (offline.failed > 0) IdeButton("Retry failed", icon = Icons.Outlined.Replay) { Downloads.retryFailed() }
+        }
+        Muted(
+            if (!offline.initialized) "Loading your downloads…"
+            else "${offline.songs.size} song${if (offline.songs.size == 1) "" else "s"} · " +
+                "${offline.collections.size} collection${if (offline.collections.size == 1) "" else "s"} · " +
+                "${Downloads.formatBytes(offline.totalBytes)} on this phone. Downloaded music plays without a connection, even when Home and Library cannot load.",
+            Modifier.padding(bottom = 12.dp),
+        )
+    }
+    item { DownloadProgress() }
+    item {
+        val offline by Downloads.state.collectAsState()
+        if (offline.initialized && offline.isEmpty) {
+            Callout("Nothing downloaded yet. Long-press a song, album, or playlist and choose Download, or open a collection and use its Download button.")
+        }
+        val collections = Downloads.collectionItems(offline)
+        if (collections.isNotEmpty()) ShelfRow(MusicItem(app.ytmdesktop.lite.data.ItemType.shelf, "offline-collections", "Downloaded collections", items = collections), actions)
+    }
+    item { DownloadedSongs(vm, host) }
+}
+
+@Composable
+private fun DownloadProgress() {
+    val c = Ytmd.colors
+    val offline by Downloads.state.collectAsState()
+    val entries = offline.progress.entries.sortedBy { (_, p) -> if (p.downloading) 0 else if (p.queued) 1 else 2 }
+    if (entries.isEmpty()) return
+    val titles = (offline.collections.flatMap { it.tracks } + offline.songs).associate { it.videoId to it.title }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp)
+            .background(c.low, Shape)
+            .border(1.dp, c.outlineVariant, Shape)
+            .padding(10.dp),
+    ) {
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = c.muted.copy(alpha = 0.6f))) { append("// ") }
+                append("in progress")
+                withStyle(SpanStyle(color = c.muted)) {
+                    append("  ${offline.active} active · ${offline.queued} queued${if (offline.failed > 0) " · ${offline.failed} failed" else ""}")
+                }
+            },
+            Modifier.padding(bottom = 6.dp),
+            style = Type.tiny,
+            color = c.muted,
+        )
+        entries.take(40).forEach { (videoId, p) ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(
+                    when { p.failed -> Icons.Outlined.ErrorOutline; p.downloading -> Icons.Outlined.Downloading; else -> Icons.Outlined.Schedule },
+                    null, Modifier.size(16.dp), tint = if (p.failed) c.error else c.muted,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(titles[videoId] ?: videoId, style = Type.small, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (p.failed) c.error else c.onSurface)
+                    if (p.failed) Muted(p.error ?: "Download failed", style = Type.tiny)
+                    else Box(Modifier.fillMaxWidth().padding(top = 3.dp).height(3.dp).background(c.highest)) {
+                        Box(Modifier.fillMaxWidth(p.percent.coerceIn(0f, 100f) / 100f).height(3.dp).background(c.primary))
+                    }
+                }
+                Muted(when { p.failed -> "failed"; p.queued -> "queued"; else -> "${p.percent.toInt()}%" }, style = Type.tiny)
+                IconBtn(Icons.Outlined.Close, if (p.failed) "Dismiss" else "Cancel download", size = 30.dp, iconSize = 16.dp) { Downloads.cancel(videoId) }
+            }
+        }
+        if (entries.size > 40) Muted("…and ${entries.size - 40} more.", style = Type.tiny)
+    }
+}
+
+@Composable
+private fun DownloadedSongs(vm: AppViewModel, host: Host) {
+    val c = Ytmd.colors
+    val offline by Downloads.state.collectAsState()
+    val songs = offline.songs
+    if (songs.isEmpty()) return
+    val items = songs.map { it.toMusicItem() }
+    Column {
+        Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = c.muted.copy(alpha = 0.55f))) { append("// ") }
+                    append("downloaded songs")
+                },
+                Modifier.weight(1f),
+                style = Type.small.copy(fontWeight = FontWeight.SemiBold),
+                color = c.muted,
+            )
+            IdeButton("Play all", icon = Icons.Filled.PlayArrow) { vm.playItems(items, 0) }
+            Spacer(Modifier.width(8.dp))
+            IdeButton("Shuffle", icon = Icons.Outlined.Shuffle) { vm.player.playItems(items, shuffled = true) }
+        }
+        songs.forEachIndexed { i, q ->
+            TrackRow(
+                i, items[i],
+                liked = q.videoId in vm.likedIds,
+                downloaded = true,
+                onPlay = { vm.playItems(items, i) },
+                onLike = { vm.toggleLike(q.videoId, q) },
+                onMenu = { host.showSongMenu(q) },
+                onArtist = vm::openArtist,
+            )
+        }
     }
 }
 
@@ -550,6 +720,25 @@ private fun SettingsPanel(vm: AppViewModel, host: Host) {
             }
             Spacer(Modifier.height(10.dp))
             Muted("Audio streams are resolved on-device with NewPipeExtractor, with the yt-dlp backend as a fallback. Up to 256 MB of audio is cached.", style = Type.tiny)
+        }
+
+        SettingsBlock("Downloads") {
+            val offline by Downloads.state.collectAsState()
+            var confirm by remember { mutableStateOf(false) }
+            Muted(
+                "${offline.songs.size} song${if (offline.songs.size == 1) "" else "s"} and ${offline.collections.size} collection${if (offline.collections.size == 1) "" else "s"} use ${Downloads.formatBytes(offline.totalBytes)}. " +
+                    "Downloads use the best available audio stream and keep playing without a connection.",
+                Modifier.padding(bottom = 10.dp),
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                IdeButton("Open downloads", icon = Icons.Outlined.DownloadForOffline) { vm.showPanel(Panel.downloads) }
+                if (confirm) {
+                    IdeButton("Confirm: remove everything") { confirm = false; Downloads.removeAll(); vm.statusMsg = "all downloads removed" }
+                    IdeButton("Cancel") { confirm = false }
+                } else {
+                    IdeButton("Remove all downloads", enabled = !offline.isEmpty) { confirm = true }
+                }
+            }
         }
 
         SettingsBlock("Last.fm") {

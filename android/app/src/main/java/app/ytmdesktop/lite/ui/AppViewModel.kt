@@ -20,13 +20,17 @@ import app.ytmdesktop.lite.data.Prefs
 import app.ytmdesktop.lite.data.QueueItem
 import app.ytmdesktop.lite.data.SearchFilter
 import app.ytmdesktop.lite.data.Sharing
+import app.ytmdesktop.lite.data.toQueueItem
+import app.ytmdesktop.lite.playback.Downloads
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.text.DateFormat
+import java.util.Date
 
 enum class Panel(val label: String) {
-    home("Home"), explore("Discover"), library("Library"), queue("Queue"),
+    home("Home"), explore("Discover"), library("Library"), queue("Queue"), downloads("Downloads"),
     settings("Settings"), lastfm("Last.fm"), search("Search"), detail("Collection"),
 }
 
@@ -94,6 +98,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch { Account.likedIds.collect { likedIds = it } }
+        viewModelScope.launch {
+            // Offline collection pages follow the download index as tracks finish or are removed.
+            Downloads.state.collect { st ->
+                val key = detailStack.lastOrNull()?.target?.offlineKey
+                if (panel == Panel.detail && key != null) detailData = Downloads.detail(st, key)
+            }
+        }
         viewModelScope.launch {
             when (val s = Backend.state.first { it !is Backend.State.Starting }) {
                 is Backend.State.Ready -> {
@@ -198,6 +209,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         panelJob?.cancel()
         detailData = null
         loadError = null
+        entry.target.offlineKey?.let { key ->
+            detailData = Downloads.detail(Downloads.state.value, key)
+            loadError = if (detailData == null) "This download was removed." else null
+            loading = false
+            return
+        }
         panelJob = viewModelScope.launch {
             loading = true
             try {
@@ -222,6 +239,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun openItem(item: MusicItem) {
         when {
             item.type == ItemType.song && item.videoId != null -> playFromUi(item)
+            item.offlineKey != null -> openDetail(DetailTarget(offlineKey = item.offlineKey, title = item.title), item)
             item.type == ItemType.mood || item.params != null ->
                 openDetail(DetailTarget(params = item.params, title = item.title), item)
             item.playlistId != null -> openDetail(DetailTarget(playlistId = item.playlistId, title = item.title), item)
@@ -395,6 +413,64 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun playlistOptions(): List<PlaylistOption> = Api.loadPlaylistOptions()
+
+    // ── Offline downloads ────────────────────────────────────────────────────
+
+    val offline get() = Downloads.state
+
+    fun downloadItem(item: MusicItem) {
+        item.toQueueItem()?.let { q ->
+            val already = q.videoId in Downloads.state.value.downloadedIds
+            Downloads.pin(q)
+            statusMsg = if (already) "${item.title} is already downloaded" else "downloading ${item.title}"
+            return
+        }
+        val key = Downloads.keyFor(item)
+        if (key == null) {
+            statusMsg = "Only songs, albums, playlists, and artists can be downloaded"
+            return
+        }
+        viewModelScope.launch {
+            try {
+                statusMsg = "preparing ${item.title}…"
+                val data = if (detailItem?.id == item.id) detailData else null
+                val tracks = (data?.items ?: downloadTracks(item)).mapNotNull { it.toQueueItem() }
+                val title = (data?.title ?: item.title).let { if (item.type == ItemType.artist) "$it · Top songs" else it }
+                val n = Downloads.addCollection(
+                    key, title, data?.subtitle ?: item.subtitle,
+                    data?.thumbnails?.firstOrNull() ?: item.thumbnails.firstOrNull(), tracks,
+                )
+                statusMsg = if (n == 0) "${item.title} is already downloaded" else "downloading $n track${if (n == 1) "" else "s"} from ${item.title}"
+            } catch (e: Exception) { report(e) }
+        }
+    }
+
+    /** Tracks to save for a collection: an artist's top songs rather than its radio. */
+    private suspend fun downloadTracks(item: MusicItem): List<MusicItem> =
+        Api.browseDetail(DetailTarget(browseId = item.browseId, playlistId = item.playlistId, params = item.params, title = item.title)).items
+
+    fun removeDownload(item: MusicItem) {
+        if (item.type == ItemType.song && item.videoId != null) {
+            Downloads.unpin(item.videoId)
+            statusMsg = "removed download: ${item.title}"
+            return
+        }
+        val key = Downloads.keyFor(item) ?: return
+        Downloads.removeCollection(key)
+        statusMsg = "removed download: ${item.title}"
+        if (panel == Panel.detail && detailStack.lastOrNull()?.target?.offlineKey == key) goBack()
+    }
+
+    fun downloadQueue() {
+        val queue = player.state.queue
+        if (queue.isEmpty()) {
+            statusMsg = "The queue is empty"
+            return
+        }
+        val stamp = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date())
+        val n = Downloads.addQueue(queue, "Queue · $stamp")
+        statusMsg = "downloading $n of ${queue.size} queued tracks"
+    }
 
     fun addToPlaylist(option: PlaylistOption, track: QueueItem) {
         viewModelScope.launch {

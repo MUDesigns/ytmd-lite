@@ -3,6 +3,7 @@
   import { thumb } from "$lib/api";
   import ArtistLinks from "./ArtistLinks.svelte";
   import { codeTheme } from "$lib/theme";
+  import { isDownloaded, offline } from "$lib/offline";
 
   let {
     item,
@@ -27,6 +28,7 @@
   const showArtistLinks = $derived(
     item.type === "song" || item.type === "album" || item.type === "playlist",
   );
+  const downloaded = $derived(isDownloaded($offline, item));
 
   function open() {
     onopen?.(item);
@@ -71,6 +73,11 @@
       <span class="mood-label">{item.title.slice(0, 1)}</span>
     {:else}
       <span class="material-symbols-outlined placeholder">album</span>
+    {/if}
+    {#if downloaded}
+      <span class="offline-badge" title="Available offline" aria-label="Available offline">
+        <span class="material-symbols-outlined">download_done</span>
+      </span>
     {/if}
     {#if canPlay && !isMood}
       <button type="button" class="play" title="Play" onclick={play}>
@@ -195,6 +202,22 @@
   }
   .play:hover {
     filter: brightness(1.1);
+  }
+  .offline-badge {
+    position: absolute;
+    left: 4px;
+    top: 4px;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius);
+    display: grid;
+    place-items: center;
+    background: rgba(10, 13, 18, 0.78);
+    color: var(--md-sys-color-primary);
+    z-index: 2;
+  }
+  .offline-badge .material-symbols-outlined {
+    font-size: 14px;
   }
   .card:hover .play {
     opacity: 1;

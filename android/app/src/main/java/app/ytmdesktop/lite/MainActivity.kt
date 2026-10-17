@@ -20,6 +20,7 @@ import app.ytmdesktop.lite.auth.LoginActivity
 import app.ytmdesktop.lite.data.Prefs
 import app.ytmdesktop.lite.data.Sharing
 import app.ytmdesktop.lite.lastfm.LastFm
+import app.ytmdesktop.lite.playback.Downloads
 import app.ytmdesktop.lite.ui.App
 import app.ytmdesktop.lite.ui.AppViewModel
 import app.ytmdesktop.lite.ui.Platform
@@ -76,6 +77,8 @@ class MainActivity : ComponentActivity() {
         }
 
         if (savedInstanceState == null) handleIntent(intent)
+        // Downloads interrupted by a process death continue under their foreground service.
+        Downloads.resumePending(this)
     }
 
     override fun onNewIntent(intent: Intent) {

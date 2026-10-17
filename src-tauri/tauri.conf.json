@@ -25,6 +25,7 @@
       "../python-backend/server.py",
       "../python-backend/stream_resolver.py",
       "../python-backend/audio_proxy.py",
+      "../python-backend/offline_library.py",
       "../python-backend/requirements.txt",
       "resources/potgen/server/**/*",
       "resources/playback-runtime.json",

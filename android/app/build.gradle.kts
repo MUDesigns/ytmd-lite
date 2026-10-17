@@ -101,7 +101,7 @@ chaquopy {
         getByName("main") {
             // Share the desktop backend instead of copying it.
             srcDir(File(repoRoot, "python-backend"))
-            include("ytmd_android.py", "server.py", "audio_proxy.py", "stream_resolver.py")
+            include("ytmd_android.py", "server.py", "audio_proxy.py", "stream_resolver.py", "offline_library.py")
         }
     }
 }

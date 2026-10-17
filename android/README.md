@@ -27,6 +27,26 @@ The Android app does not include Discord Rich Presence, the mini player (the med
 notification and lock screen replace it), audio-output selection, the auto-updater,
 or saved listening sessions.
 
+## Offline downloads
+
+Long-press a song, album, playlist, or artist and choose **Download**, use the Download
+button on a collection page, or **Download** on the Queue page. **Library → Downloads**
+(also reachable from Settings and from load errors while offline) lists collections and
+songs on the phone with progress, cancel, and retry.
+
+Unlike the desktop app, Android does not use the backend for downloads: `playback/Downloads.kt`
+runs a Media3 `DownloadManager` that saves tracks into a non-evicting `SimpleCache` under
+`filesDir/downloads`, resolving `ytmd://<videoId>` through the same NewPipe path as playback
+(`playback/YtmdDataSource.kt`). `YtmdDownloadService` is a `dataSync` foreground service with a
+progress notification so downloads survive the app being backgrounded; they pause without a
+network and continue when it returns. The player reads the download cache first (read-only),
+then the 256 MB streaming cache, then the network. Which collections and pinned songs want each
+track is kept in `filesDir/offline-library.json`; removing a playlist deletes only tracks nothing
+else references. Thumbnails snap to two sizes (320 px and 1024 px) so views share cached files,
+and downloads prefetch both into Coil's cache and `ArtworkProvider`, which now also backs the
+media notification artwork. In Android Auto, **Library** starts with a **Downloads** folder and
+still works without an account or a connection.
+
 ## Android Auto
 
 `PlaybackService` is a Media3 `MediaLibraryService`, so Android Auto shows the app as a media source

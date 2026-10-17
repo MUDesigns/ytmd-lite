@@ -15,6 +15,7 @@ import app.ytmdesktop.lite.data.MusicItem
 import app.ytmdesktop.lite.data.Prefs
 import app.ytmdesktop.lite.data.QueueItem
 import app.ytmdesktop.lite.data.SearchFilter
+import app.ytmdesktop.lite.data.toMusicItem
 import app.ytmdesktop.lite.data.toQueueItem
 import java.util.Collections
 
@@ -32,6 +33,8 @@ object LibraryTree {
     const val LIBRARY = "${PREFIX}library"
     const val EXPLORE = "${PREFIX}explore"
     const val RECENT = "${PREFIX}recent"
+    private const val OFFLINE = "${PREFIX}offline"
+    private const val OFFLINE_ALL = "all"
     private const val CACHE_TTL_MS = 10L * 60 * 1000
 
     fun isBrowseId(mediaId: String) = mediaId.startsWith(PREFIX)
@@ -46,6 +49,8 @@ object LibraryTree {
         val artistRadio: String? = null,
         /** Shown instead of an empty list. */
         val empty: String = "This list is empty.",
+        /** An explanatory row after the items (for example why the online part is missing). */
+        val note: String? = null,
         val generation: Int = Account.generation.value,
         val at: Long = System.currentTimeMillis(),
     ) {
@@ -187,6 +192,12 @@ object LibraryTree {
             for (item in section.items) {
                 out += when {
                     item.videoId != null -> song(nodeId, index, item, group)
+                    item.offlineKey != null -> folder(
+                        id("offline", "k" to item.offlineKey), item.title, item.subtitle,
+                        if (item.offlineKey == OFFLINE_ALL) iconUri("ic_auto_downloads") else ArtworkProvider.uriFor(Api.thumbUrl(item.thumbnails, 300)),
+                        if (item.type == ItemType.album) MediaMetadata.MEDIA_TYPE_ALBUM else MediaMetadata.MEDIA_TYPE_PLAYLIST,
+                        group,
+                    )
                     item.isCollection || item.playlistId != null -> folder(
                         detailId(item), item.title, item.artistLine.ifEmpty { null },
                         ArtworkProvider.uriFor(Api.thumbUrl(item.thumbnails, 300)),
@@ -203,6 +214,7 @@ object LibraryTree {
             }
         }
         if (out.isEmpty()) out += message("Nothing here yet", listing.empty)
+        listing.note?.let { out += message(it, null) }
         return out
     }
 
@@ -235,6 +247,8 @@ object LibraryTree {
         if (nodeId == RECENT) {
             return Listing(listOf(Section(null, Prefs.recentTracks().map(::recentItem))), empty = "Songs you play will show up here.")
         }
+        // Downloads live on the phone and change as tracks finish: never serve them stale.
+        if (nodeId.startsWith(OFFLINE)) return fetch(nodeId)
         if (!force) {
             cache[nodeId]?.takeIf { it.generation == Account.generation.value && System.currentTimeMillis() - it.at < CACHE_TTL_MS }
                 ?.let { return it }
@@ -255,8 +269,16 @@ object LibraryTree {
     private suspend fun fetch(nodeId: String): Listing {
         if (nodeId == HOME) return Listing(Api.loadHome().shelves.map { Section(it.title, it.items.orEmpty()) })
         if (nodeId == LIBRARY) {
-            requireSignedIn()
-            return Listing(Api.loadLibrary().shelves.map { Section(it.title, it.items.orEmpty()) })
+            // Downloads come first so the car can play them without a connection or an account.
+            val offline = Downloads.state.value
+            val downloads = if (offline.songs.isEmpty()) emptyList() else listOf(Section("Downloads", listOf(offlineRoot(offline))))
+            return try {
+                requireSignedIn()
+                Listing(downloads + Api.loadLibrary().shelves.map { Section(it.title, it.items.orEmpty()) })
+            } catch (e: Exception) {
+                if (downloads.isEmpty()) throw e
+                Listing(downloads, note = if (e is SignInRequired) "Sign in on your phone for the rest of your library." else "Your library couldn't load: ${e.message}")
+            }
         }
         if (nodeId == EXPLORE) {
             val explore = Api.loadExplore(Prefs.heard())
@@ -285,21 +307,37 @@ object LibraryTree {
                     Listing(listOf(Section(null, data.items)), shuffle = true)
                 }
             }
+            "offline" -> {
+                val offline = Downloads.state.value
+                val key = p["k"] ?: OFFLINE_ALL
+                if (key == OFFLINE_ALL) {
+                    Listing(
+                        listOf(
+                            Section("Collections", Downloads.collectionItems(offline)),
+                            Section("Songs", offline.songs.map { it.toMusicItem() }),
+                        ),
+                        shuffle = true,
+                        empty = "Download music on your phone to listen offline.",
+                    )
+                } else {
+                    val collection = offline.collection(key) ?: throw ApiException("This download was removed")
+                    val tracks = collection.tracks.filter { it.videoId in offline.downloadedIds }.map { it.toMusicItem() }
+                    Listing(listOf(Section(null, tracks)), shuffle = true, empty = "Still downloading on your phone.")
+                }
+            }
             else -> throw ApiException("Unknown page")
         }
     }
 
-    private fun recentItem(q: QueueItem) = MusicItem(
-        type = ItemType.song,
-        id = q.videoId,
-        title = q.title,
-        subtitle = q.author,
-        thumbnails = q.thumbnails,
-        videoId = q.videoId,
-        album = q.album,
-        albumId = q.albumId,
-        artistBrowseId = q.channelId,
+    private fun offlineRoot(offline: Downloads.State) = MusicItem(
+        type = ItemType.playlist,
+        id = OFFLINE,
+        title = "Downloads",
+        subtitle = "${offline.songs.size} songs on this phone",
+        offlineKey = OFFLINE_ALL,
     )
+
+    private fun recentItem(q: QueueItem) = q.toMusicItem()
 
     // ── Playback ─────────────────────────────────────────────────────────────
 

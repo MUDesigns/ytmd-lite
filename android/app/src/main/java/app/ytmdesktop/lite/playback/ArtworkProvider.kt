@@ -63,7 +63,8 @@ class ArtworkProvider : ContentProvider() {
     companion object {
         private const val AUTHORITY = "${BuildConfig.APPLICATION_ID}.artwork"
         private const val PARAM_URL = "u"
-        private const val MAX_FILES = 400
+        // Also holds the art of downloaded songs (two sizes each), so keep plenty of room.
+        private const val MAX_FILES = 2500
         private val ALLOWED_HOST = Regex("""^(?:[a-z0-9-]+\.)*(?:googleusercontent\.com|ggpht\.com|ytimg\.com)$""")
 
         fun uriFor(remote: String?): Uri? {

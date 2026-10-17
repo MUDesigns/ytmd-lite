@@ -26,7 +26,8 @@ object MediaItems {
             .setTitle(item.title)
             .setArtist(item.author)
             .setAlbumTitle(item.album)
-            .setArtworkUri(Api.thumbUrl(item.thumbnails, 544)?.let(Uri::parse))
+            // Served through the artwork provider's disk cache, so downloaded music keeps its art offline.
+            .setArtworkUri(ArtworkProvider.uriFor(Api.thumbUrl(item.thumbnails, 544)))
             .setExtras(extras)
             .build()
         return withPlaybackUri(

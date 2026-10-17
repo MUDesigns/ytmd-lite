@@ -597,11 +597,12 @@ object Api {
     fun thumbUrl(thumbnails: List<String>?, size: Int? = null): String? {
         val raw = thumbnails?.lastOrNull()?.takeIf { it.isNotEmpty() } ?: return null
         if (size == null) return raw
-        // Preserve Google's crop/format suffix; only resize known thumbnail hosts.
+        // Preserve Google's crop/format suffix; only resize known thumbnail hosts. Sizes snap to two
+        // buckets so every view shares the same cached file, which keeps downloaded music's art offline.
         return runCatching {
             val url = raw.toHttpUrl()
             if (Regex("^(?:lh\\d+\\.googleusercontent\\.com|yt3\\.(?:ggpht\\.com|googleusercontent\\.com))$").matches(url.host)) {
-                val px = minOf(1024, size)
+                val px = if (size <= 320) 320 else 1024
                 raw.replace(Regex("=w\\d+-h\\d+"), "=w$px-h$px")
             } else raw
         }.getOrDefault(raw)

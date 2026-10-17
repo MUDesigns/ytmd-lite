@@ -24,6 +24,7 @@ class PlaybackBackendTests(unittest.TestCase):
                        _AUDIO_FMT="audio", _STREAM_ATTEMPTS=[("audio", None, True)] * 9,
                        _ydl_extract_url=Mock(), _stream_url_from_info=lambda info: info.get("url"),
                        _logging=logging.getLogger(__name__), _stream_resolver=self.resolver,
+                       _offline=Mock(audio_path=Mock(return_value=None)), _offline_mime=lambda p: "audio/mp4",
                        AudioStream=Mock(), AudioProxyError=AudioProxyError)
         tree = ast.parse(Path("python-backend/server.py").read_text(encoding="utf-8"))
         names = {"_extract_playback_stream", "audio_stream", "audio_stream_warm", "stream_url",

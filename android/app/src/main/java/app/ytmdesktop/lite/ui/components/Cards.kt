@@ -27,9 +27,11 @@ import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.MusicNote
+import androidx.compose.material.icons.outlined.OfflinePin
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -52,6 +54,7 @@ import app.ytmdesktop.lite.data.Api
 import app.ytmdesktop.lite.data.ArtistLink
 import app.ytmdesktop.lite.data.ItemType
 import app.ytmdesktop.lite.data.MusicItem
+import app.ytmdesktop.lite.playback.Downloads
 import app.ytmdesktop.lite.ui.theme.Type
 import app.ytmdesktop.lite.ui.theme.Ytmd
 import app.ytmdesktop.lite.ui.theme.mixWith
@@ -72,6 +75,7 @@ fun MusicCard(item: MusicItem, actions: ItemActions) {
     val c = Ytmd.colors
     val isMood = item.type == ItemType.mood || item.color != null
     val showArtists = item.type == ItemType.song || item.type == ItemType.album || item.type == ItemType.playlist
+    val offline by Downloads.state.collectAsState()
     Column(
         Modifier
             .width(140.dp)
@@ -87,6 +91,14 @@ fun MusicCard(item: MusicItem, actions: ItemActions) {
                 color = if (isMood) parseHex(Api.moodColor(item)) else null,
                 label = item.title,
             )
+            if (offline.isDownloaded(item)) {
+                Box(
+                    Modifier.align(Alignment.TopStart).padding(4.dp).size(20.dp).clip(Shape).background(Color(0xC70A0D12)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.OfflinePin, "Available offline", Modifier.size(14.dp), tint = c.primary)
+                }
+            }
             if (item.canPlay && !isMood) {
                 Box(
                     Modifier
@@ -240,6 +252,9 @@ fun TrackRow(
     onMenu: () -> Unit,
     onArtist: (ArtistLink) -> Unit,
     selected: Boolean = false,
+    downloaded: Boolean = false,
+    /** Percent of an in-flight download, shown instead of the offline pin. */
+    downloadPercent: Int? = null,
 ) {
     val c = Ytmd.colors
     val code = Ytmd.code
@@ -272,6 +287,10 @@ fun TrackRow(
                 item.artistLinks, item.subtitle ?: item.type.name, onArtist,
                 prefix = if (code) buildAnnotatedString { append("// ") } else null,
             )
+        }
+        when {
+            downloaded -> Icon(Icons.Outlined.OfflinePin, "Available offline", Modifier.size(15.dp), tint = c.primary)
+            downloadPercent != null -> Muted("$downloadPercent%", style = Type.tiny)
         }
         IconBtn(
             if (liked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,

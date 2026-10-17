@@ -20,6 +20,9 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Album
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -50,6 +53,7 @@ import app.ytmdesktop.lite.data.QueueItem
 import app.ytmdesktop.lite.data.Sharing
 import app.ytmdesktop.lite.data.toQueueItem
 import app.ytmdesktop.lite.lastfm.LastFm
+import app.ytmdesktop.lite.playback.Downloads
 import app.ytmdesktop.lite.ui.components.ActionSheet
 import app.ytmdesktop.lite.ui.components.ItemActions
 import app.ytmdesktop.lite.ui.components.MenuAction
@@ -204,6 +208,23 @@ private fun songActions(vm: AppViewModel, q: QueueItem, host: Host, pickPlaylist
             })
         }
         add(MenuAction("Share…", Icons.Outlined.Link) { host.shareSong(q) })
+        val offline = Downloads.state.value
+        val pending = offline.progress[q.videoId]
+        when {
+            q.videoId in offline.downloadedIds -> add(MenuAction("Remove download", Icons.Outlined.DownloadDone) { vm.removeDownload(item) })
+            pending != null && !pending.failed -> add(MenuAction("Cancel download (${pending.percent.toInt()}%)", Icons.Outlined.Close) { Downloads.cancel(q.videoId) })
+            else -> add(MenuAction("Download", Icons.Outlined.Download) { vm.downloadItem(item) })
+        }
+    }
+}
+
+/** Download / remove entry for albums, playlists and artists (their top songs). */
+private fun MutableList<MenuAction>.addCollectionDownload(vm: AppViewModel, item: MusicItem) {
+    val key = Downloads.keyFor(item) ?: return
+    if (Downloads.state.value.collection(key) != null) {
+        add(MenuAction("Remove download", Icons.Outlined.DownloadDone) { vm.removeDownload(item) })
+    } else {
+        add(MenuAction(if (item.type == ItemType.artist) "Download top songs" else "Download", Icons.Outlined.Download) { vm.downloadItem(item) })
     }
 }
 
@@ -218,6 +239,7 @@ private fun itemMenuActions(vm: AppViewModel, item: MusicItem, host: Host, pickP
                     vm.openDetail(DetailTarget(browseId = id, title = item.title), item)
                     vm.playFromUi(item)
                 })
+                addCollectionDownload(vm, item)
             }
             ItemType.mood, ItemType.shelf -> {}
             else -> {
@@ -226,6 +248,7 @@ private fun itemMenuActions(vm: AppViewModel, item: MusicItem, host: Host, pickP
                 add(MenuAction("Play next", Icons.Outlined.QueuePlayNext) { vm.queueItem(item, next = true) })
                 add(MenuAction("Add to queue", Icons.AutoMirrored.Outlined.PlaylistPlay) { vm.queueItem(item) })
                 Sharing.shareablePlaylistId(item)?.let { pid -> add(MenuAction("Share playlist…", Icons.Outlined.Link) { host.sharePlaylist(pid) }) }
+                addCollectionDownload(vm, item)
             }
         }
     }

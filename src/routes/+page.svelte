@@ -51,6 +51,11 @@
   import { readHeard, readSessions, writeSessions, sessionFromState, type ListeningSession } from "$lib/listening";
   import type { PaletteCommand } from "$lib/commands";
   import { miniPlayerUpdate, type MiniLikeRequest, type MiniLikeResult } from "$lib/mini-player";
+  import {
+    cancelDownload, clearAllDownloads, collectionKeyFor, collectionProgress, downloadCollection, downloadSong,
+    formatBytes, isDownloaded, isOfflineError, offline, offlineCollectionItem, offlineShelves,
+    refreshLibrary, removeCollection, removeSong, retryFailed, startPolling,
+  } from "$lib/offline";
 
   let panel = $state<Panel>("home");
   let paletteOpen = $state(false);
@@ -97,8 +102,9 @@
     if (storeSessions(sessions.map(s => s.id === id ? { ...s, name: name.trim().slice(0, 80) } : s))) statusMsg = "Session renamed";
   }
   const paletteCommands = $derived.by((): PaletteCommand[] => [
-    ...(["home", "explore", "library", "queue", "settings", "lastfm"] as Panel[]).map(target => ({ id: `nav-${target}`, label: `Go to ${viewLabels[target]}`, detail: "Navigation", run: () => setPanel(target) })),
+    ...(["home", "explore", "library", "queue", "downloads", "settings", "lastfm"] as Panel[]).map(target => ({ id: `nav-${target}`, label: `Go to ${viewLabels[target]}`, detail: "Navigation", run: () => setPanel(target) })),
     { id: "sessions", label: "Saved sessions and queue rules", detail: "Save, resume, and arrange your listening queue", run: () => setPanel("queue") },
+    ...(player.queue?.length ? [{ id: "download-queue", label: "Download the current queue", detail: `${player.queue.length} tracks for offline listening`, run: downloadCurrentQueue }] : []),
     { id: "mini-player", label: "Open mini player", detail: "Compact controls in the corner of this monitor", run: openMiniPlayer },
     ...(player.videoDetails ? [
       { id: "play-pause", label: player.trackState === "Playing" ? "Pause playback" : "Resume playback", run: () => playerCtl.playPause() },
@@ -183,7 +189,8 @@
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let detail = $state<DetailTarget | null>(null);
   let detailData = $state<BrowseResult | null>(null);
-  const explorerShelves = $derived(panel === "detail" ? detailData?.shelves || [] : panel === "library" ? libraryData?.shelves || [] : panel === "explore" ? exploreData?.shelves || [] : panel === "search" ? searchData?.shelves || [] : panel === "home" ? homeData?.shelves || [] : []);
+  const downloadShelves = $derived(offlineShelves($offline));
+  const explorerShelves = $derived(panel === "detail" ? detailData?.shelves || [] : panel === "library" ? libraryData?.shelves || [] : panel === "explore" ? exploreData?.shelves || [] : panel === "search" ? searchData?.shelves || [] : panel === "home" ? homeData?.shelves || [] : panel === "downloads" ? downloadShelves : []);
   let detailFrom = $state<Panel>("home");
   let detailItem = $state<MusicItem | null>(null);
   let detailHistory = $state<Array<{
@@ -199,6 +206,8 @@
   });
   let loadError = $state<string | null>(null);
   let loading = $state(false);
+  /** Hint shown with a load error when YouTube is unreachable but downloads exist. */
+  const offlineHint = $derived(!!loadError && isOfflineError(loadError) && !!$offline.library && ($offline.library.songs.length > 0));
 
   /** Rail highlight — stays on Library when drilling into a playlist detail. */
   const railActive = $derived(panel === "detail" ? detailFrom : panel);
@@ -261,6 +270,8 @@
     workbenchFiles = loadWorkbenchFiles();
     sessions = readSessions();
     const unsubs: Array<() => void> = [];
+    unsubs.push(startPolling());
+    void refreshLibrary().catch(() => { /* The Downloads panel reports the error when opened. */ });
     let mounted = true;
     let sharedRequest = 0;
     const openSharedUrls = async (urls: string[]) => {
@@ -484,7 +495,10 @@
       if (target === "home") data = await loadHome();
       else if (target === "explore") data = await loadExplore([...readHeard()]);
       else if (target === "library") data = await loadLibrary();
-      else if (target === "detail" && targetDetail) {
+      else if (target === "detail" && targetDetail?.offlineKey) {
+        data = offlineDetail(targetDetail.offlineKey);
+        if (!data) throw new Error("This download was removed.");
+      } else if (target === "detail" && targetDetail) {
         [, data] = await Promise.all([refreshLiked(), browseDetail(targetDetail)]);
       }
       if (request !== browseRequest || panel !== target) return;
@@ -537,6 +551,114 @@
     if (next === "home" || next === "explore" || next === "library") {
       void refreshPanel(next);
     }
+    if (next === "downloads") {
+      void refreshLibrary().catch((e) => { statusMsg = String(e); });
+    }
+  }
+
+  // ── Offline downloads ────────────────────────────────────────────────────
+
+  /** A saved collection rendered from disk, so it opens without a connection. */
+  function offlineDetail(key: string): BrowseResult | null {
+    const state = $offline;
+    const collection = state.library?.collections.find((c) => c.key === key);
+    if (!collection) return null;
+    const item = offlineCollectionItem(collection, state.downloadedIds);
+    return {
+      title: item.title, subtitle: item.subtitle, shelves: [], items: item.items || [],
+      thumbnails: item.thumbnails, kind: item.type === "album" ? "album" : "playlist",
+    };
+  }
+
+  function collectionInfoFor(item: MusicItem) {
+    const data = item === detailItem ? detailData : null;
+    return {
+      title: data?.title || item.title,
+      subtitle: data?.subtitle || item.subtitle,
+      thumbnail: data?.thumbnails?.[0] || item.thumbnails[0],
+    };
+  }
+
+  async function downloadItem(item: MusicItem) {
+    try {
+      if (item.videoId && item.type === "song") {
+        const status = await downloadSong(item);
+        statusMsg = status === "done" ? `${item.title} is already downloaded` : `Downloading ${item.title}…`;
+        return;
+      }
+      const key = collectionKeyFor(item);
+      if (!key) throw new Error("Only songs, albums, playlists, and artists can be downloaded.");
+      const [kind, id] = key.split(/:(.*)/s) as [MusicItem["type"] | "queue", string];
+      statusMsg = `Preparing ${item.title} for download…`;
+      const tracks = item === detailItem && detailData?.items?.length ? detailData.items : await resolveCollectionTracks(item);
+      const info = collectionInfoFor(item);
+      if (kind === "artist") info.title = `${info.title} · Top songs`;
+      const result = await downloadCollection(kind as "playlist" | "album" | "artist", id, tracks, info);
+      statusMsg = result.queued
+        ? `Downloading ${result.queued} of ${result.total} tracks from ${item.title}`
+        : `${item.title} is already downloaded`;
+    } catch (e) {
+      statusMsg = String(e);
+    }
+  }
+
+  async function removeDownloadFor(item: MusicItem) {
+    try {
+      if (item.videoId && item.type === "song") {
+        await removeSong(item.videoId);
+        statusMsg = `Removed download: ${item.title}`;
+        return;
+      }
+      const key = collectionKeyFor(item);
+      if (!key) return;
+      await removeCollection(key);
+      statusMsg = `Removed download: ${item.title}`;
+      if (panel === "detail" && detail?.offlineKey === key) await goBack();
+    } catch (e) {
+      statusMsg = String(e);
+    }
+  }
+
+  async function downloadCurrentQueue() {
+    const queue = player.queue || [];
+    if (!queue.length) { statusMsg = "The queue is empty."; return; }
+    try {
+      const stamp = new Date();
+      const result = await downloadCollection("queue", String(Date.now()), queue, {
+        title: `Queue · ${stamp.toLocaleDateString()} ${stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        subtitle: `${queue.length} tracks`,
+        thumbnail: queue[player.queueIndex ?? 0]?.thumbnails[0],
+      });
+      statusMsg = `Downloading ${result.queued} of ${result.total} queued tracks`;
+    } catch (e) {
+      statusMsg = String(e);
+    }
+  }
+
+  let confirmRemoveDownload = $state(false);
+  let confirmClearDownloads = $state(false);
+  $effect(() => { void detailItem; confirmRemoveDownload = false; });
+  const detailDownload = $derived.by(() => {
+    if (!detailItem) return { label: "", state: "none" as const };
+    const progress = collectionProgress($offline, detailItem);
+    if (progress) {
+      if (progress.pending) return { label: `Downloading ${progress.done}/${progress.total}`, state: "busy" as const };
+      if (progress.failed && progress.done < progress.total) return { label: `${progress.done}/${progress.total} downloaded`, state: "done" as const };
+      return { label: "Downloaded", state: "done" as const };
+    }
+    return { label: "Download", state: "none" as const };
+  });
+
+  async function onDetailDownload() {
+    if (!detailItem) return;
+    if (detailDownload.state === "none") { confirmRemoveDownload = false; await downloadItem(detailItem); return; }
+    if (!confirmRemoveDownload) { confirmRemoveDownload = true; return; }
+    confirmRemoveDownload = false;
+    await removeDownloadFor(detailItem);
+  }
+
+  function pct(entry: { progress: number } | undefined): number {
+    return Math.round(((entry?.progress ?? 0) * 100));
   }
 
   async function goBack() {
@@ -611,6 +733,7 @@
         playlistId: item.playlistId,
         title: item.title,
         params: item.params,
+        offlineKey: item.offlineKey,
       };
       detailData = null;
       panel = "detail";
@@ -889,6 +1012,19 @@
         icon: likedIds.has(item.videoId) ? "heart_minus" : "favorite",
       });
     }
+    if ((isSong && item.videoId) || collectionKeyFor(item)) {
+      const downloaded = isDownloaded($offline, item);
+      const pending = isSong && item.videoId ? $offline.downloads[item.videoId] : undefined;
+      actions.push({ id: "download-separator", label: "", separator: true });
+      if (downloaded) {
+        actions.push({ id: "undownload", label: "Remove download", icon: "download_done" });
+      } else if (pending && pending.status !== "error") {
+        actions.push({ id: "cancel-download", label: `Cancel download (${pct(pending)}%)`, icon: "close" });
+      } else {
+        const what = isSong ? "" : item.type === "artist" ? " top songs" : item.type === "album" ? " album" : " playlist";
+        actions.push({ id: "download", label: `Download${what}`, icon: "download" });
+      }
+    }
     return actions;
   }
 
@@ -917,6 +1053,12 @@
             : null);
       if (artist?.name) void openArtist(artist);
     } else if (id === "like") await toggleLikeFor(item.videoId, item);
+    else if (id === "download") await downloadItem(item);
+    else if (id === "undownload") await removeDownloadFor(item);
+    else if (id === "cancel-download" && item.videoId) {
+      await cancelDownload(item.videoId).catch((e) => statusMsg = String(e));
+      statusMsg = `Cancelled download: ${item.title}`;
+    }
   }
 
   async function playQueueIndex(index: number) {
@@ -1241,6 +1383,15 @@
       <span class="material-symbols-outlined">queue_music</span>
       <span class="rail-label">Queue</span>
     </button>
+    <button class="rail-btn" class:active={railActive === "downloads"} title="Downloads" onclick={() => setPanel("downloads")}>
+      <span class="material-symbols-outlined">download_for_offline</span>
+      <span class="rail-label">Offline</span>
+      {#if $offline.active + $offline.queued > 0}
+        <span class="dot busy" title="Downloading"></span>
+      {:else if $offline.failed > 0}
+        <span class="dot" title="Some downloads failed"></span>
+      {/if}
+    </button>
     <div class="rail-spacer"></div>
     <button class="rail-btn" class:active={railActive === "lastfm"} title="Last.fm" onclick={() => setPanel("lastfm")}>
       <span class="material-symbols-outlined">graphic_eq</span>
@@ -1414,6 +1565,20 @@
                 <span class="material-symbols-outlined">playlist_add</span>
                 Add to queue
               </button>
+              {#if detailItem && collectionKeyFor(detailItem)}
+                <button
+                  class="btn"
+                  class:subscribed={detailDownload.state === "done"}
+                  disabled={!detailTrackCount || loading || detailDownload.state === "busy"}
+                  title={detailDownload.state === "done" ? "Click twice to remove this download" : "Save every track for offline listening"}
+                  onclick={() => void onDetailDownload()}
+                >
+                  <span class="material-symbols-outlined">
+                    {detailDownload.state === "done" ? "download_done" : detailDownload.state === "busy" ? "downloading" : "download"}
+                  </span>
+                  {confirmRemoveDownload ? "Remove download?" : detailDownload.label}
+                </button>
+              {/if}
               {#if shareablePlaylistId(detailItem)}
                 <button class="btn" aria-haspopup="menu" onclick={openPlaylistShare}>
                   <span class="material-symbols-outlined">share</span>
@@ -1443,9 +1608,20 @@
 
         {#if loadError}
           <div class="callout error">{loadError}</div>
-          <button class="btn" onclick={() => (engine.signedIn ? refreshPanel() : openLogin())}>
-            {engine.signedIn ? "Retry" : "Sign in"}
-          </button>
+          {#if offlineHint}
+            <div class="callout">You appear to be offline. Downloaded music is available in Offline.</div>
+          {/if}
+          <div class="row-actions">
+            <button class="btn" onclick={() => (engine.signedIn ? refreshPanel() : openLogin())}>
+              {engine.signedIn ? "Retry" : "Sign in"}
+            </button>
+            {#if offlineHint}
+              <button class="btn primary" onclick={() => setPanel("downloads")}>
+                <span class="material-symbols-outlined">download_for_offline</span>
+                Open downloads
+              </button>
+            {/if}
+          </div>
         {/if}
 
         <div class="browse-body" class:dimmed={loading}>
@@ -1482,6 +1658,11 @@
                       />
                     </div>
                   </div>
+                  {#if item.videoId && $offline.downloadedIds.has(item.videoId)}
+                    <span class="material-symbols-outlined offline-mark" title="Available offline" aria-label="Available offline">download_done</span>
+                  {:else if item.videoId && $offline.downloads[item.videoId] && $offline.downloads[item.videoId].status !== "error"}
+                    <span class="offline-mark muted" title="Downloading">{pct($offline.downloads[item.videoId])}%</span>
+                  {/if}
                   <button
                     type="button"
                     class="icon-btn like-btn"
@@ -1545,21 +1726,42 @@
           </div>
         {/if}
       </div>
-    {:else if panel === "home" || panel === "explore" || panel === "library" || panel === "queue"}
+    {:else if panel === "home" || panel === "explore" || panel === "library" || panel === "queue" || panel === "downloads"}
       <div class="browse">
         {#if panel === "queue"}
           <div class="page-head">
             <h1 class="page-title">Queue</h1>
-            <button
-              class="btn"
-              disabled={!player.queue?.length}
-              onclick={() => {
-                playerCtl.clearQueue();
-                statusMsg = "Queue cleared";
-              }}
-            >
-              Clear
-            </button>
+            <div class="row-actions compact">
+              <button class="btn" disabled={!player.queue?.length} title="Save every queued track for offline listening" onclick={downloadCurrentQueue}>
+                <span class="material-symbols-outlined">download</span>
+                Download queue
+              </button>
+              <button
+                class="btn"
+                disabled={!player.queue?.length}
+                onclick={() => {
+                  playerCtl.clearQueue();
+                  statusMsg = "Queue cleared";
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        {:else if panel === "downloads"}
+          <div class="page-head">
+            <h1 class="page-title">Offline</h1>
+            <div class="row-actions compact">
+              {#if $offline.failed > 0}
+                <button class="btn" onclick={async () => { try { statusMsg = `Retrying ${await retryFailed()} download(s)`; } catch (e) { statusMsg = String(e); } }}>
+                  <span class="material-symbols-outlined">replay</span>
+                  Retry failed
+                </button>
+              {/if}
+              <button class="icon-btn" title="Refresh" onclick={() => refreshLibrary().catch((e) => statusMsg = String(e))}>
+                <span class="material-symbols-outlined">refresh</span>
+              </button>
+            </div>
           </div>
         {:else if panel !== "home"}
           <div class="page-head">
@@ -1577,15 +1779,120 @@
           </div>
         {/if}
 
-        {#if loadError}
+        {#if loadError && panel !== "downloads"}
           <div class="callout error">{loadError}</div>
-          <button class="btn" onclick={() => (engine.signedIn ? refreshPanel() : openLogin())}>
-            {engine.signedIn ? "Retry" : "Sign in"}
-          </button>
+          {#if offlineHint}
+            <div class="callout">You appear to be offline. Downloaded music is available in Offline.</div>
+          {/if}
+          <div class="row-actions">
+            <button class="btn" onclick={() => (engine.signedIn ? refreshPanel() : openLogin())}>
+              {engine.signedIn ? "Retry" : "Sign in"}
+            </button>
+            {#if offlineHint}
+              <button class="btn primary" onclick={() => setPanel("downloads")}>
+                <span class="material-symbols-outlined">download_for_offline</span>
+                Open downloads
+              </button>
+            {/if}
+          </div>
         {/if}
 
         <div class="browse-body" class:dimmed={loading}>
-        {#if panel === "queue"}
+        {#if panel === "downloads"}
+          {@const lib = $offline.library}
+          {@const pending = Object.entries($offline.downloads)}
+          {#if $offline.error}
+            <div class="callout error">{$offline.error}</div>
+          {/if}
+          <p class="muted">
+            {#if lib}
+              {lib.songs.length} song{lib.songs.length === 1 ? "" : "s"} · {lib.collections.length} collection{lib.collections.length === 1 ? "" : "s"} · {formatBytes(lib.totalBytes)} on disk.
+              Downloaded music plays without a connection, even when Home and Library cannot load.
+            {:else}
+              Loading your downloads…
+            {/if}
+          </p>
+          {#if pending.length}
+            <section class="download-queue" aria-label="Download progress">
+              <h2>// in progress <span class="muted">{$offline.active} active · {$offline.queued} queued{$offline.failed ? ` · ${$offline.failed} failed` : ""}</span></h2>
+              {#each pending.slice(0, 40) as [videoId, entry] (videoId)}
+                <div class="download-row" class:failed={entry.status === "error"}>
+                  <span class="material-symbols-outlined">{entry.status === "error" ? "error" : entry.status === "downloading" ? "downloading" : "schedule"}</span>
+                  <div class="download-meta">
+                    <div class="download-title">{entry.title || videoId}</div>
+                    {#if entry.status === "error"}
+                      <div class="download-sub">{entry.error || "Download failed"}</div>
+                    {:else}
+                      <div class="download-bar" role="progressbar" aria-valuenow={pct(entry)} aria-valuemin="0" aria-valuemax="100">
+                        <span style={`width:${pct(entry)}%`}></span>
+                      </div>
+                    {/if}
+                  </div>
+                  <span class="download-pct">{entry.status === "queued" ? "queued" : entry.status === "error" ? "failed" : `${pct(entry)}%`}</span>
+                  <button class="icon-btn" title={entry.status === "error" ? "Dismiss" : "Cancel download"} onclick={() => cancelDownload(videoId).catch((e) => statusMsg = String(e))}>
+                    <span class="material-symbols-outlined">close</span>
+                  </button>
+                </div>
+              {/each}
+              {#if pending.length > 40}<p class="muted">…and {pending.length - 40} more.</p>{/if}
+            </section>
+          {/if}
+          {#if lib && !lib.songs.length && !pending.length}
+            <div class="callout">
+              Nothing downloaded yet. Right-click a song, album, or playlist and choose <strong>Download</strong>, or open a collection and use its Download button.
+            </div>
+          {/if}
+          {#each downloadShelves as shelf (shelf.id)}
+            {#if shelf.id === "offline-songs"}
+              <section class="shelf-list">
+                <h2 class="shelf-heading">
+                  <span>// {shelf.title.toLowerCase()}</span>
+                  <span class="row-actions compact">
+                    <button class="btn" onclick={() => shelf.items?.length && playerCtl.playItems(shelf.items, 0).then(() => statusMsg = "Playing downloaded songs").catch((e) => statusMsg = String(e))}>
+                      <span class="material-symbols-outlined">play_arrow</span> Play all
+                    </button>
+                    <button class="btn" onclick={() => shelf.items?.length && playerCtl.playItemsShuffled(shelf.items).then(() => statusMsg = "Shuffling downloaded songs").catch((e) => statusMsg = String(e))}>
+                      <span class="material-symbols-outlined">shuffle</span> Shuffle
+                    </button>
+                  </span>
+                </h2>
+                <div class="track-list">
+                  {#each shelf.items || [] as item, i (item.id)}
+                    <div
+                      class="track-row"
+                      role="button"
+                      tabindex="0"
+                      onclick={() => shelf.items && playerCtl.playItems(shelf.items, i).catch((e) => statusMsg = String(e))}
+                      onkeydown={(e) => e.key === "Enter" && shelf.items && playerCtl.playItems(shelf.items, i)}
+                      oncontextmenu={(e) => { e.preventDefault(); openContext(item, e); }}
+                    >
+                      <span class="num">{i + 1}</span>
+                      <div class="t-art">
+                        {#if thumb(item)}
+                          <img src={thumb(item)} alt="" referrerpolicy="no-referrer" />
+                        {:else}
+                          <span class="material-symbols-outlined">music_note</span>
+                        {/if}
+                      </div>
+                      <div class="t-meta">
+                        <div class="t-title">{item.title}</div>
+                        <div class="t-sub">
+                          <ArtistLinks artists={item.artistLinks} fallback={item.subtitle || item.album || "song"} onopen={openArtist} />
+                        </div>
+                      </div>
+                      {#if item.album}<span class="muted t-album">{item.album}</span>{/if}
+                      <button class="icon-btn" title="Remove download" onclick={(e) => { e.stopPropagation(); void removeDownloadFor(item); }}>
+                        <span class="material-symbols-outlined">delete</span>
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              </section>
+            {:else}
+              <ShelfRow {shelf} onopen={openItem} onplay={playFromUi} oncontext={openContext} onartist={openArtist} />
+            {/if}
+          {/each}
+        {:else if panel === "queue"}
           <QueueWorkspace {player} {sessions} onsave={saveSession} onresume={resumeSession} onrename={renameSession}
             ondelete={(id) => { if (storeSessions(sessions.filter(s => s.id !== id))) statusMsg = "Session deleted"; }}
             onstatus={(message) => statusMsg = message} />
@@ -1810,6 +2117,32 @@
         </section>
 
         <section class="settings-block">
+          <h2 class="settings-label">Downloads</h2>
+          {#if $offline.library}
+            <p class="muted">
+              {$offline.library.songs.length} song{$offline.library.songs.length === 1 ? "" : "s"} and
+              {$offline.library.collections.length} collection{$offline.library.collections.length === 1 ? "" : "s"} use {formatBytes($offline.library.totalBytes)}.
+              Downloads use the best available audio stream and play without a connection.
+            </p>
+            <p class="muted path">Folder: {$offline.library.dir}</p>
+          {:else}
+            <p class="muted">Download information is unavailable while the catalog API is offline.</p>
+          {/if}
+          <div class="row-actions">
+            <button class="btn" onclick={() => setPanel("downloads")}>
+              <span class="material-symbols-outlined">download_for_offline</span>
+              Open downloads
+            </button>
+            {#if confirmClearDownloads}
+              <button class="btn danger" onclick={async () => { confirmClearDownloads = false; try { await clearAllDownloads(); statusMsg = "All downloads removed"; } catch (e) { statusMsg = String(e); } }}>Confirm: remove everything</button>
+              <button class="btn" onclick={() => confirmClearDownloads = false}>Cancel</button>
+            {:else}
+              <button class="btn" disabled={!$offline.library?.songs.length && !$offline.library?.collections.length} onclick={() => confirmClearDownloads = true}>Remove all downloads</button>
+            {/if}
+          </div>
+        </section>
+
+        <section class="settings-block">
           <h2 class="settings-label">Audio</h2>
           <label class="block">
             <span>Audio output</span>
@@ -1983,6 +2316,109 @@
   }
   .dot.ok {
     background: #81c995;
+  }
+  .dot.busy {
+    background: var(--md-sys-color-primary);
+    animation: status-pulse 1.2s ease-in-out infinite;
+  }
+  .offline-mark {
+    color: var(--md-sys-color-primary);
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .offline-mark.muted {
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .t-album {
+    font-size: 10px;
+    max-width: 160px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row-actions.compact {
+    margin: 0;
+  }
+  .btn.danger {
+    color: var(--md-sys-color-error);
+    border-color: color-mix(in srgb, var(--md-sys-color-error) 45%, var(--md-sys-color-outline));
+  }
+  .download-queue {
+    margin: 0 0 18px;
+    padding: 10px 12px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--radius);
+    background: var(--md-sys-color-surface-container-low);
+  }
+  .download-queue h2,
+  .shelf-heading {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: lowercase;
+    color: var(--md-sys-color-on-surface-variant);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .shelf-list {
+    margin-bottom: 22px;
+  }
+  .download-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+  }
+  .download-row.failed {
+    color: var(--md-sys-color-error);
+  }
+  .download-row > .material-symbols-outlined {
+    font-size: 18px;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+  .download-row.failed > .material-symbols-outlined {
+    color: var(--md-sys-color-error);
+  }
+  .download-meta {
+    flex: 1;
+    min-width: 0;
+  }
+  .download-title {
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .download-sub {
+    font-size: 10px;
+    opacity: 0.85;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .download-bar {
+    height: 3px;
+    margin-top: 4px;
+    background: var(--md-sys-color-surface-container-highest);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .download-bar span {
+    display: block;
+    height: 100%;
+    background: var(--md-sys-color-primary);
+    transition: width 0.3s ease;
+  }
+  .download-pct {
+    width: 46px;
+    text-align: right;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--md-sys-color-on-surface-variant);
   }
   .content {
     grid-area: content;

@@ -1,10 +1,10 @@
 import type { Panel } from "./types";
 
 export const viewLabels: Record<Panel, string> = {
-  home: "Home", explore: "Discover", library: "Library", queue: "Queue",
+  home: "Home", explore: "Discover", library: "Library", queue: "Queue", downloads: "Downloads",
   settings: "Settings", lastfm: "Last.fm", search: "Search", detail: "Collection",
 };
-export const workspaceViews: Panel[] = ["home", "explore", "library", "queue", "settings"];
+export const workspaceViews: Panel[] = ["home", "explore", "library", "queue", "downloads", "settings"];
 export const codeFileTypes = [
   { extension: "cs", symbol: "C#" }, { extension: "tsx", symbol: "TSX" },
   { extension: "ts", symbol: "TS" }, { extension: "js", symbol: "JS" },

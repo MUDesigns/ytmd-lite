@@ -9,6 +9,7 @@ Lightweight YouTube Music desktop client built with **Tauri 2** + **Svelte 5**. 
 - Local Flask API on `:9847` (adapted from Kodama’s `python-backend`)
 - Player dock: queue, shuffle, repeat, like, audio output selection
 - Share songs from the player or song menu: copy a YTMD Lite, YouTube Music, or YouTube link
+- Offline listening: download songs, albums, playlists (including Liked Songs), an artist's top songs, or the current queue
 - Last.fm now-playing / scrobble
 - Discord Rich Presence (optional)
 - Accent color picker
@@ -60,6 +61,28 @@ For latency diagnostics, frontend console entries tagged `[playback timing]`
 separate URL resolution from audio startup. Backend `/debug/info` includes
 `potAvailable`, `potServerRunning`, and `[stream timing]` logs for extraction and
 first proxy bytes. Preparing a URL does not download the whole song.
+
+### Offline downloads
+
+Right-click a song, album, playlist, or artist and choose **Download**, use the
+**Download** button on a collection page, or **Download queue** on the Queue page
+(also in the command palette). The **Offline** rail entry lists downloaded
+collections and songs with progress, lets you cancel or retry, and plays
+everything from disk. Downloaded tracks show a `download_done` mark on cards and
+track rows. Settings → Downloads shows the storage used and can remove everything.
+
+The backend keeps audio and a JSON sidecar per song in `song_cache/` under its
+data directory, with collection manifests in `song_cache/collections/`. A song
+stays on disk while it is pinned (downloaded on its own) or still referenced by a
+collection; removing a playlist only deletes tracks nothing else uses. Downloads
+run two at a time with the same yt-dlp clients as playback (`/offline/*` routes
+in `server.py`, logic in `offline_library.py`). Playback checks the download
+first: `/audio-stream/<id>` serves the local file with byte ranges and
+`/audio-stream/<id>/warm` answers without touching YouTube, so the regular player
+works offline. Thumbnails of downloaded music are warmed into the image cache,
+and `/imgproxy` serves expired cached copies when the CDN is unreachable. When a
+page fails to load because YouTube is unreachable, the error offers **Open
+downloads**.
 
 ### Last.fm (optional for scrobbling)
 

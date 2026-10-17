@@ -2536,6 +2536,7 @@ def cache_clear():
             _playlist_cache.clear()
         if cat == "songs":
             _download_status = {}
+            _offline.remove_all()
     return jsonify({"ok": True})
 
 @app.route("/cache/settings", methods=["GET", "POST"])
@@ -2958,6 +2959,13 @@ from audio_proxy import AudioStream, AudioProxyError
 
 @app.route("/audio-stream/<video_id>")
 def audio_stream(video_id):
+    local = _offline.audio_path(video_id)
+    if local:
+        # Downloaded music plays without a network connection; Flask serves byte ranges.
+        from flask import send_file
+        response = send_file(local, mimetype=_offline_mime(local), conditional=True)
+        response.headers["Cache-Control"] = "no-store"
+        return response
     key = (_current_profile, video_id)
     started = time.monotonic()
     stream = None
@@ -2991,6 +2999,8 @@ def audio_stream(video_id):
 @app.route("/audio-stream/<video_id>/warm")
 def audio_stream_warm(video_id):
     """Resolve the upcoming track without transferring audio; share foreground work."""
+    if _offline.audio_path(video_id):
+        return jsonify({"ok": True, "offline": True})
     key = (_current_profile, video_id)
     if request.args.get("refresh") == "1":
         _stream_resolver.invalidate(key)
@@ -4203,10 +4213,48 @@ def get_mood_playlists():
         return jsonify({"error": str(e)}), 500
 
 
+def _img_cache_path(url):
+    import hashlib
+    url_hash = hashlib.sha1(url.encode()).hexdigest()
+    ext = "jpg"
+    for candidate in ("webp", "png", "gif"):
+        if candidate in url.lower():
+            ext = candidate
+            break
+    return os.path.join(IMG_CACHE_DIR, f"{url_hash}.{ext}"), ext
+
+
+def _img_fetch(url, allow_stale=True):
+    """Return (bytes, content_type, source) for a thumbnail through the disk cache.
+    When the CDN is unreachable, an expired copy is served so downloaded music keeps its art."""
+    cache_path, ext = _img_cache_path(url)
+    cached_type = "image/webp" if ext == "webp" else f"image/{ext}"
+    cached = _cache_enabled["images"] and os.path.exists(cache_path)
+    if cached and time.time() - os.path.getmtime(cache_path) < IMG_CACHE_TTL:
+        with open(cache_path, "rb") as f:
+            return f.read(), cached_type, "HIT"
+    try:
+        # Use requests (certifi CA bundle) rather than urllib: on macOS the bundled Python
+        # has no system CA certs, so urllib HTTPS fails with CERTIFICATE_VERIFY_FAILED.
+        headers = {"User-Agent": "Mozilla/5.0"}
+        if "ytimg.com" in url or "yt3.ggpht.com" in url or "youtube.com" in url:
+            headers["Referer"] = "https://music.youtube.com/"
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        if _cache_enabled["images"]:
+            with open(cache_path, "wb") as f:
+                f.write(r.content)
+        return r.content, r.headers.get("Content-Type", "image/jpeg"), "MISS"
+    except Exception:
+        if cached and allow_stale:
+            with open(cache_path, "rb") as f:
+                return f.read(), cached_type, "STALE"
+        raise
+
+
 @app.route("/imgproxy")
 def img_proxy():
     """Proxy YouTube thumbnail images with persistent disk cache."""
-    import hashlib, urllib.request
     from flask import Response
 
     url = request.args.get("url", "")
@@ -4217,49 +4265,14 @@ def img_proxy():
     if request.args.get("hq", "0") == "1":
         url = _upscale_thumbnail_url(url)
 
-    # Derive a stable filename from the URL
-    url_hash = hashlib.sha1(url.encode()).hexdigest()
-    # Detect extension from URL (default jpeg)
-    ext = "jpg"
-    for candidate in ("webp", "png", "gif"):
-        if candidate in url.lower():
-            ext = candidate
-            break
-    cache_path = os.path.join(IMG_CACHE_DIR, f"{url_hash}.{ext}")
-
-    # Serve from disk if cached and fresh
-    if _cache_enabled["images"] and os.path.exists(cache_path):
-        age = time.time() - os.path.getmtime(cache_path)
-        if age < IMG_CACHE_TTL:
-            content_type = "image/webp" if ext == "webp" else f"image/{ext}"
-            with open(cache_path, "rb") as f:
-                data = f.read()
-            resp = Response(data, content_type=content_type)
-            resp.headers["Cache-Control"] = "public, max-age=604800"
-            resp.headers["X-Cache"] = "HIT"
-            return resp
-
-    # Fetch from CDN (omit YouTube-specific Referer for non-ytimg domains).
-    # Use requests (certifi CA bundle) rather than urllib: on macOS the bundled Python
-    # has no system CA certs, so urllib HTTPS fails with CERTIFICATE_VERIFY_FAILED.
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        if "ytimg.com" in url or "yt3.ggpht.com" in url or "youtube.com" in url:
-            headers["Referer"] = "https://music.youtube.com/"
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.content
-        content_type = r.headers.get("Content-Type", "image/jpeg")
-        # Write to disk cache
-        if _cache_enabled["images"]:
-            with open(cache_path, "wb") as f:
-                f.write(data)
-        resp = Response(data, content_type=content_type)
-        resp.headers["Cache-Control"] = "public, max-age=604800"
-        resp.headers["X-Cache"] = "MISS"
-        return resp
+        data, content_type, source = _img_fetch(url)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    resp = Response(data, content_type=content_type)
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    resp.headers["X-Cache"] = source
+    return resp
 
 @app.route("/like/<video_id>", methods=["POST"])
 def like_song(video_id):
@@ -4360,19 +4373,74 @@ def song_stats(video_id):
 
 # ─── Song Cache / Offline Playback ──────────────────────────────────────────
 
+# ─── Offline library (downloaded songs, playlists, albums) ───────────────────
+from offline_library import OfflineLibrary, mime_for as _offline_mime
+
+
+def _download_offline_audio(video_id, output_tpl, progress):
+    """Save a song with yt-dlp, trying the same clients as playback."""
+    import yt_dlp
+
+    def hook(d):
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            if total > 0:
+                progress(d.get("downloaded_bytes", 0) / total)
+        elif d.get("status") == "finished":
+            progress(1.0)
+
+    attempts = ([(_AUDIO_FMT, _pot_opts(), False)] if _POT_AVAILABLE else []) + list(_STREAM_ATTEMPTS)
+    last_error = None
+    for fmt, extra, no_auth in attempts:
+        ydl_opts = {"format": fmt, "quiet": True, "no_warnings": True, "outtmpl": output_tpl,
+                    "progress_hooks": [hook], "noplaylist": True, "socket_timeout": 15, "retries": 2}
+        if _NODE22:
+            ydl_opts["js_runtimes"] = {"node": {"path": _NODE22}}
+        if extra:
+            ydl_opts.update(extra)
+        if not no_auth:
+            _apply_ydl_auth(ydl_opts)
+        base = "www.youtube.com" if no_auth else "music.youtube.com"
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"https://{base}/watch?v={video_id}", download=True)
+                return ydl.prepare_filename(info)
+        except Exception as exc:
+            last_error = exc
+            if _is_hard_error(str(exc)):
+                break
+            _logging.warning("[offline] %s fmt=%s auth=%s failed: %s", video_id, fmt, not no_auth, exc)
+    raise RuntimeError(str(last_error) if last_error else "Download failed")
+
+
+def _offline_art_variants(url):
+    """The thumbnail sizes the apps request, so artwork of downloaded music works offline."""
+    import re
+    out = [url, _upscale_thumbnail_url(url)]
+    if re.search(r"(?:lh\d+\.googleusercontent\.com|yt3\.(?:ggpht\.com|googleusercontent\.com))/", url):
+        for px in (64, 256, 512):
+            out.append(re.sub(r"=w\d+-h\d+", f"=w{px}-h{px}", url))
+    return list(dict.fromkeys(out))
+
+
+def _warm_image_cache(url):
+    for variant in _offline_art_variants(url):
+        try:
+            _img_fetch(variant, allow_stale=False)
+        except Exception:
+            pass
+
+
+_offline = OfflineLibrary(SONG_CACHE_DIR, _download_offline_audio, fetch_image=_warm_image_cache)
+
+
 def _song_audio_path(video_id):
-    """Return the path to the cached audio file (.opus or .m4a)."""
-    safe = video_id.replace("/", "_").replace("\\", "_")
-    for ext in (".opus", ".m4a", ".webm", ".mp3"):
-        p = os.path.join(SONG_CACHE_DIR, safe + ext)
-        if os.path.exists(p):
-            return p
-    return None
+    """Path of a downloaded song, if any (also reused by the Composer bridge)."""
+    return _offline.audio_path(video_id)
+
 
 def _player_audio_path(video_id):
-    """Audio the player already downloaded via /stream-prepare (temp 'kiyoshi-audio' dir).
-    Lets the Composer reuse the file the player just played instead of re-extracting it
-    from YouTube — the slow part the user noticed."""
+    """Audio the player already downloaded via /stream-prepare (temp 'kiyoshi-audio' dir)."""
     import tempfile, glob as _glob
     cache_dir = os.path.join(tempfile.gettempdir(), "kiyoshi-audio")
     safe = video_id.replace("/", "_").replace("\\", "_")
@@ -4386,185 +4454,110 @@ def _player_audio_path(video_id):
                 pass
     return None
 
+
 def _song_meta_path(video_id):
-    safe = video_id.replace("/", "_").replace("\\", "_")
-    return os.path.join(SONG_CACHE_DIR, safe + ".json")
+    return _offline.meta_path(video_id)
 
-def _download_song_bg(video_id, meta):
-    """Background download via yt-dlp."""
-    global _download_status, _download_queue
+
+@app.route("/offline/library")
+def offline_library():
+    return jsonify(_offline.library())
+
+
+@app.route("/offline/status")
+def offline_status():
+    return jsonify(_offline.status())
+
+
+@app.route("/offline/songs/<video_id>", methods=["POST"])
+def offline_pin(video_id):
     try:
-        import yt_dlp
-        safe = video_id.replace("/", "_").replace("\\", "_")
-        output_tpl = os.path.join(SONG_CACHE_DIR, safe + ".%(ext)s")
-
-        def progress_hook(d):
-            if d.get("status") == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                downloaded = d.get("downloaded_bytes", 0)
-                if total > 0 and video_id in _download_queue:
-                    _download_queue[video_id]["progress"] = round(downloaded / total, 3)
-
-        last_dl_err = None
-        for fmt, extra, no_auth in _STREAM_ATTEMPTS:
-            try:
-                ydl_opts = {
-                    "format": fmt,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "outtmpl": output_tpl,
-                    "progress_hooks": [progress_hook],
-                }
-                if extra:
-                    ydl_opts.update(extra)
-                if not no_auth:
-                    _apply_ydl_auth(ydl_opts)
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([f"https://music.youtube.com/watch?v={video_id}"])
-                last_dl_err = None
-                break
-            except Exception as dl_e:
-                last_dl_err = dl_e
-                if _is_hard_error(str(dl_e)):
-                    break
-                _logging.warning(f"[download] {video_id} fmt={fmt} auth={not no_auth}: {dl_e}")
-        if last_dl_err:
-            raise last_dl_err
-        # Save metadata
-        meta_path = _song_meta_path(video_id)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False)
-        _download_status[video_id] = "done"
-        if video_id in _download_queue:
-            _download_queue[video_id]["status"] = "done"
-            _download_queue[video_id]["progress"] = 1.0
-        _schedule_cleanup(_download_status, video_id)
-        _schedule_cleanup(_download_queue, video_id)
-    except Exception as e:
-        _download_status[video_id] = "error"
-        if video_id in _download_queue:
-            _download_queue[video_id]["status"] = "error"
-            if "Music Premium" in str(e):
-                _download_queue[video_id]["error_type"] = "premium_only"
-        _schedule_cleanup(_download_status, video_id)
-        _schedule_cleanup(_download_queue, video_id)
-        _logging.error(f"[download] {video_id}: {type(e).__name__}: {e}")
+        return jsonify({"ok": True, **_offline.pin(video_id, request.get_json(silent=True) or {})})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
+@app.route("/offline/songs/<video_id>", methods=["DELETE"])
+def offline_unpin(video_id):
+    return jsonify({"ok": True, **_offline.unpin(video_id)})
+
+
+@app.route("/offline/collections", methods=["POST"])
+def offline_add_collection():
+    data = request.get_json(silent=True) or {}
+    try:
+        result = _offline.add_collection(data.get("kind"), data.get("id"), data.get("tracks") or [],
+                                         title=data.get("title"), subtitle=data.get("subtitle"),
+                                         thumbnail=data.get("thumbnail"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/offline/collections/<path:key>", methods=["DELETE"])
+def offline_remove_collection(key):
+    return jsonify({"ok": True, **_offline.remove_collection(key)})
+
+
+@app.route("/offline/cancel/<video_id>", methods=["POST"])
+def offline_cancel(video_id):
+    return jsonify({"ok": True, "cancelled": _offline.cancel(video_id)})
+
+
+@app.route("/offline/retry", methods=["POST"])
+def offline_retry():
+    return jsonify({"ok": True, "queued": _offline.retry_failed()})
+
+
+@app.route("/offline/clear", methods=["POST"])
+def offline_clear():
+    _offline.remove_all()
+    return jsonify({"ok": True})
+
+
+# Kodama-era routes, kept for the Composer and older callers.
 @app.route("/song/download/<video_id>", methods=["POST"])
 def download_song(video_id):
-    if _song_audio_path(video_id):
-        _download_status[video_id] = "done"
-        return jsonify({"ok": True, "status": "done"})
-    if _download_status.get(video_id) == "downloading":
-        return jsonify({"ok": True, "status": "downloading"})
-    data = request.get_json() or {}
-    meta = {
-        "videoId": video_id,
-        "title": data.get("title", ""),
-        "artists": data.get("artists", ""),
-        "album": data.get("album", ""),
-        "duration": data.get("duration", ""),
-        "thumbnail": data.get("thumbnail", ""),
-    }
-    _download_status[video_id] = "downloading"
-    _download_queue[video_id] = {
-        "videoId": video_id,
-        "title": meta.get("title", ""),
-        "artists": meta.get("artists", ""),
-        "thumbnail": meta.get("thumbnail", ""),
-        "status": "downloading",
-        "progress": 0.0,
-    }
-    t = threading.Thread(target=_download_song_bg, args=(video_id, meta), daemon=True)
-    t.start()
-    return jsonify({"ok": True, "status": "downloading"})
+    data = request.get_json(silent=True) or {}
+    return jsonify({"ok": True, **_offline.pin(video_id, data)})
 
 
 @app.route("/song/download/status/<video_id>")
 def download_status(video_id):
-    if _song_audio_path(video_id):
-        return jsonify({"status": "done"})
-    status = _download_status.get(video_id, "not_found")
-    return jsonify({"status": status})
+    return jsonify({"status": _offline.song_status(video_id)})
 
 
 @app.route("/downloads/queue")
 def downloads_queue():
-    # Return active + recently finished entries; clean up old "done"/"error" entries
-    to_remove = [vid for vid, d in _download_queue.items() if d["status"] in ("done", "error")]
-    # Keep them in response but prune after returning
-    result = list(_download_queue.values())
-    for vid in to_remove:
-        _download_queue.pop(vid, None)
-    return jsonify({"queue": result})
+    downloads = _offline.status()["downloads"]
+    return jsonify({"queue": [{"videoId": v, **d} for v, d in downloads.items()]})
 
 
 @app.route("/song/cached/<video_id>")
 def serve_cached_song(video_id):
     from flask import send_file
-    path = _song_audio_path(video_id)
+    path = _offline.audio_path(video_id)
     if not path:
         return jsonify({"error": "not cached"}), 404
-    # Determine MIME type
-    ext = os.path.splitext(path)[1].lower()
-    mime = {".opus": "audio/opus", ".m4a": "audio/mp4", ".webm": "audio/webm", ".mp3": "audio/mpeg"}.get(ext, "application/octet-stream")
-    return send_file(path, mimetype=mime)
+    return send_file(path, mimetype=_offline_mime(path), conditional=True)
 
 
 @app.route("/song/cached/list")
 def list_cached_songs():
-    songs = []
-    try:
-        for f in os.listdir(SONG_CACHE_DIR):
-            if f.endswith(".json"):
-                try:
-                    with open(os.path.join(SONG_CACHE_DIR, f), "r", encoding="utf-8") as fh:
-                        meta = json.load(fh)
-                        songs.append(meta)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return jsonify({"songs": songs})
+    return jsonify({"songs": _offline.library()["songs"]})
 
 
 @app.route("/song/cached/<video_id>", methods=["DELETE"])
 def delete_cached_song(video_id):
-    audio = _song_audio_path(video_id)
-    if audio:
-        try:
-            os.remove(audio)
-        except Exception:
-            pass
-    meta = _song_meta_path(video_id)
-    if os.path.exists(meta):
-        try:
-            os.remove(meta)
-        except Exception:
-            pass
-    _download_status.pop(video_id, None)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, **_offline.unpin(video_id)})
 
 
 @app.route("/songs/cached/delete-batch", methods=["POST"])
 def delete_cached_songs_batch():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     video_ids = data.get("videoIds", [])
     for video_id in video_ids:
-        audio = _song_audio_path(video_id)
-        if audio:
-            try:
-                os.remove(audio)
-            except Exception:
-                pass
-        meta = _song_meta_path(video_id)
-        if os.path.exists(meta):
-            try:
-                os.remove(meta)
-            except Exception:
-                pass
-        _download_status.pop(video_id, None)
+        _offline.unpin(video_id)
     return jsonify({"ok": True, "removed": len(video_ids)})
 
 

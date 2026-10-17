@@ -2,7 +2,6 @@ package app.ytmdesktop.lite.playback
 
 import android.app.PendingIntent
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.annotation.OptIn
@@ -12,13 +11,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
@@ -80,23 +76,18 @@ class PlaybackService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         Backend.start(this)
+        Downloads.init(this)
 
         val http = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
-        val upstream = OkHttpDataSource.Factory(http).setUserAgent(StreamResolver.USER_AGENT)
-        val resolving = ResolvingDataSource.Factory(upstream) { spec ->
-            if (spec.uri.scheme != MediaItems.SCHEME) return@Factory spec
-            val videoId = spec.uri.host ?: return@Factory spec
-            val resolved = StreamResolver.resolve(videoId)
-            val next = spec.withUri(Uri.parse(resolved.url))
-            if (resolved.viaBackend) next.withAdditionalHeaders(mapOf("X-YTMD-Token" to Backend.token)) else next
-        }
-        val dataSource = CacheDataSource.Factory()
+        // Downloaded audio first, then the streaming cache, then YouTube via ytmd:// resolution.
+        val streaming = CacheDataSource.Factory()
             .setCache(cache(this))
-            .setUpstreamDataSourceFactory(resolving)
+            .setUpstreamDataSourceFactory(YtmdDataSource.Factory(http))
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val dataSource = Downloads.playbackDataSourceFactory(streaming)
 
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
@@ -447,7 +438,7 @@ class PlaybackService : MediaLibraryService() {
         fun cache(service: PlaybackService): SimpleCache = cacheInstance ?: SimpleCache(
             File(service.cacheDir, "audio"),
             LeastRecentlyUsedCacheEvictor(256L * 1024 * 1024),
-            StandaloneDatabaseProvider(service),
+            Downloads.databaseProvider,
         ).also { cacheInstance = it }
     }
 }
