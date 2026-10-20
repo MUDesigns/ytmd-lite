@@ -25,6 +25,7 @@ import app.ytmdesktop.lite.ui.App
 import app.ytmdesktop.lite.ui.AppViewModel
 import app.ytmdesktop.lite.ui.Platform
 import app.ytmdesktop.lite.ui.theme.YtmdTheme
+import app.ytmdesktop.lite.update.AppUpdater
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -88,6 +89,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Returning from the "install unknown apps" setting with an update waiting.
+        AppUpdater.onResume(this)
         // Returning from the Last.fm approval page.
         if (LastFm.status.value.signingIn) {
             lifecycleScope.launch {

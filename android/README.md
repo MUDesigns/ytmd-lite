@@ -24,8 +24,40 @@ requests carrying a per-launch random token (`X-YTMD-Token`), so other apps cann
 your signed-in YouTube session.
 
 The Android app does not include Discord Rich Presence, the mini player (the media
-notification and lock screen replace it), audio-output selection, the auto-updater,
-or saved listening sessions.
+notification and lock screen replace it), audio-output selection, or saved listening sessions.
+
+## Updates
+
+The app updates itself from this repository's GitHub releases, without the Play Store
+(`update/AppUpdater.kt`, the counterpart of the desktop `src/lib/updater.ts`):
+
+1. On launch (at most every six hours; **Settings → Updates** can turn this off or check now)
+   the app lists published releases through the GitHub API and picks the newest
+   `YTMD-Lite_<version>_android.apk` whose version is higher than its own. It scans the list
+   rather than `/releases/latest`, because desktop-only releases have no APK and Android-only
+   releases are never marked Latest. Drafts and pre-releases are ignored, so nothing reaches
+   phones before a release is published.
+2. A banner on Home (and the Updates block in Settings) offers the download, which goes into
+   the app's cache directory with a progress bar.
+3. The download is checked against the `.apk.sha256` that CI publishes next to it, must be this
+   package with a higher version code, and must be signed with the same key as the installed app.
+4. The APK is handed to `PackageInstaller`. The first time, Android asks to allow installs from
+   YTMD Lite (**Install unknown apps**) and then confirms the install; from the second update on,
+   Android 12+ can install without the confirmation because the app is the installer of record.
+   The app restarts on the new version.
+
+Android only installs an update signed with the same key as the installed app, so every release
+must be signed with the release keystore held in the CI secrets (see **CI**): `android.yml` fails
+a release build when they are missing rather than publishing a debug-signed APK. Debug builds
+(`assembleDebug`, or a CI `…_android-debug.apk` from a branch) use a per-machine key, so they
+cannot update a release install and vice versa: uninstall first. Releases from before the
+keystore existed (v0.4.29 and earlier) were debug-signed, so phones running them need that one
+reinstall too; after it, updates are in-app.
+
+Set `UPDATER_ENABLED` to `false` in `app/build.gradle.kts` for a build that goes to a store: Play's
+policy does not allow apps to update themselves outside Play. The GitHub API allows 60 anonymous
+requests per hour per IP, which the launch check stays well under. The repository must stay public
+for the check to work without a token.
 
 ## Offline downloads
 
@@ -103,8 +135,10 @@ An Android-only change gets its own release containing just the APK, which is ne
 Latest (the desktop auto-updater reads the Latest release). `vX.Y.Z` tags, changes to
 `release.yml`, and manual runs (with a target choice) build both.
 
-Release APKs are signed when these repository secrets exist; otherwise CI builds a
-debug-signed APK (named `…_android-debug.apk`), which cannot update a release install:
+Release APKs are signed with these repository secrets. A release build fails without them (see
+**Updates**); branch and pull-request builds fall back to a debug-signed APK (named
+`…_android-debug.apk`), which cannot update a release install. CI also publishes a
+`.apk.sha256` next to each APK, which the in-app updater verifies.
 
 | Secret | Value |
 | --- | --- |

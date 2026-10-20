@@ -41,6 +41,11 @@ android {
         buildConfigField("String", "LASTFM_API_KEY", quoted(lastFm["api_key"]))
         buildConfigField("String", "LASTFM_SECRET", quoted(lastFm["secret"]))
 
+        // In-app updater (update/AppUpdater.kt) reads this repository's GitHub Releases.
+        // Set UPDATER_ENABLED to false for a store build: Play forbids apps updating themselves.
+        buildConfigField("String", "GITHUB_REPO", quoted("MUDesigns/ytmd-lite"))
+        buildConfigField("boolean", "UPDATER_ENABLED", "true")
+
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }

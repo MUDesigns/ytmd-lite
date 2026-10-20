@@ -85,6 +85,11 @@ jobs:
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ytmd-release.jks"
             echo "keystore=$RUNNER_TEMP/ytmd-release.jks" >> "$GITHUB_OUTPUT"
+          elif [ -n "$RELEASE_TAG" ]; then
+            # The in-app updater installs releases over each other, which Android only allows when
+            # every release is signed with the same key. Never publish a debug-signed release.
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set; refusing to publish a debug-signed APK to $RELEASE_TAG."
+            exit 1
           else
             echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; building a debug-signed APK."
           fi
@@ -104,13 +109,15 @@ jobs:
           version=$(node -p "require('../src-tauri/tauri.conf.json').version")
           mkdir -p dist
           cp "app/build/outputs/apk/$dir/"*.apk "dist/YTMD-Lite_${version}_android${suffix}.apk"
+          # The in-app updater verifies the download against this (update/AppUpdater.kt).
+          (cd dist && sha256sum "YTMD-Lite_${version}_android${suffix}.apk" > "YTMD-Lite_${version}_android${suffix}.apk.sha256")
           ls -la dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ytmd-lite-android
-          path: android/dist/*.apk
+          path: android/dist/*
           if-no-files-found: error
 
       - name: Attach to release
@@ -124,4 +131,4 @@ jobs:
               --title "YTMD Lite $RELEASE_TAG (Android)" \
               --notes "Android-only update. Install \`YTMD-Lite_${VERSION}_android.apk\`; desktop installers are in the latest full release. Built from commit $GITHUB_SHA."
           fi
-          gh release upload "$RELEASE_TAG" android/dist/*.apk --clobber
+          gh release upload "$RELEASE_TAG" android/dist/* --clobber

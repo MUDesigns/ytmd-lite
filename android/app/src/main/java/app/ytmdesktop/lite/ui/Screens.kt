@@ -50,6 +50,7 @@ import androidx.compose.material.icons.outlined.Radio
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
@@ -74,6 +75,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -113,6 +115,7 @@ import app.ytmdesktop.lite.ui.components.hairlineBottom
 import app.ytmdesktop.lite.ui.theme.Type
 import app.ytmdesktop.lite.ui.theme.Ytmd
 import app.ytmdesktop.lite.ui.theme.mixWith
+import app.ytmdesktop.lite.update.AppUpdater
 
 /** Platform hooks the screens need from the activity. */
 class Host(
@@ -214,6 +217,33 @@ private fun AuthBanner(onSignIn: () -> Unit, onGuest: (() -> Unit)?) {
     }
 }
 
+/** Newer GitHub release than the installed build; the full flow lives in Settings → Updates. */
+@Composable
+private fun UpdateBanner(vm: AppViewModel) {
+    val c = Ytmd.colors
+    val st by AppUpdater.status.collectAsStateCompat()
+    val release = st.available ?: return
+    if (st.dismissed || st.busy || st.apk != null) return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .background(c.high, Shape)
+            .border(1.dp, c.outline, Shape)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(Icons.Outlined.SystemUpdate, null, tint = c.onSurface)
+        Column(Modifier.weight(1f)) {
+            Text("YTMD Lite ${release.version} is available", style = Type.small.copy(fontWeight = FontWeight.SemiBold))
+            Muted("Installed: ${BuildConfig.VERSION_NAME} · ${Downloads.formatBytes(release.size)} download from GitHub.", style = Type.tiny)
+            Text("not now →", Modifier.padding(top = 4.dp).clickable { AppUpdater.dismiss() }, style = Type.tiny, color = c.primary)
+        }
+        IdeButton("Update", primary = true) { AppUpdater.download(); vm.showPanel(Panel.settings) }
+    }
+}
+
 @Composable
 private fun ErrorRetry(vm: AppViewModel, host: Host, error: String, retry: () -> Unit) {
     val offline by Downloads.state.collectAsState()
@@ -260,6 +290,7 @@ fun PanelContent(vm: AppViewModel, host: Host, actions: ItemActions, searchFocus
 }
 
 private fun LazyListScope.browsePanel(vm: AppViewModel, host: Host, actions: ItemActions) {
+    if (vm.panel == Panel.home) item { UpdateBanner(vm) }
     if (vm.recentSearches.isNotEmpty()) item { ChipsBlock("Recent", vm.recentSearches) { vm.runSearch(it) } }
     if (vm.panel != Panel.home) item {
         PageHead(vm.panel.label) {
@@ -741,6 +772,8 @@ private fun SettingsPanel(vm: AppViewModel, host: Host) {
             }
         }
 
+        if (AppUpdater.enabled) SettingsBlock("Updates") { UpdatesSettings(host) }
+
         SettingsBlock("Last.fm") {
             val st by LastFm.status.collectAsStateCompat()
             Muted(
@@ -755,6 +788,53 @@ private fun SettingsPanel(vm: AppViewModel, host: Host) {
         }
 
         Muted("YTMD Lite for Android ${BuildConfig.VERSION_NAME} · API ${if (vm.apiReady) "ready" else vm.apiError ?: "starting…"}", style = Type.tiny)
+    }
+}
+
+@Composable
+private fun UpdatesSettings(host: Host) {
+    val c = Ytmd.colors
+    val context = LocalContext.current
+    val st by AppUpdater.status.collectAsStateCompat()
+    val release = st.available
+    Muted(
+        when {
+            st.checking -> "Checking GitHub Releases…"
+            st.installing -> "Installing ${release?.version ?: "update"}… confirm the system prompt if it appears."
+            st.needsPermission -> "Allow YTMD Lite to install apps in the system setting, then come back to finish."
+            st.apk != null -> "${release?.version ?: "Update"} downloaded and verified. Installing restarts the app."
+            st.progress != null -> "Downloading ${release?.version}…"
+            release != null -> "Version ${release.version} is available (installed: ${BuildConfig.VERSION_NAME})."
+            st.lastChecked > 0 -> "Up to date (${BuildConfig.VERSION_NAME}). Checked " +
+                (if (System.currentTimeMillis() - st.lastChecked < 60_000) "just now." else "${android.text.format.DateUtils.getRelativeTimeSpanString(st.lastChecked)}.")
+            else -> "Updates install straight from this project's GitHub releases."
+        },
+        Modifier.padding(bottom = 10.dp),
+    )
+    st.progress?.let { p ->
+        Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.weight(1f).height(3.dp).background(c.highest)) {
+                Box(Modifier.fillMaxWidth(p.coerceIn(0f, 1f)).height(3.dp).background(c.primary))
+            }
+            Muted("${(p * 100).toInt()}%", style = Type.tiny)
+            IconBtn(Icons.Outlined.Close, "Cancel download", size = 30.dp, iconSize = 16.dp) { AppUpdater.cancelDownload() }
+        }
+    }
+    st.error?.let { Callout(it, error = true) }
+    FlowRow(Modifier.padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        when {
+            st.apk != null -> IdeButton("Install ${release?.version ?: "update"}", icon = Icons.Outlined.SystemUpdate, primary = true, enabled = !st.installing) { AppUpdater.install(context) }
+            release != null -> IdeButton("Download ${release.version}", icon = Icons.Outlined.Download, primary = true, enabled = !st.busy) { AppUpdater.download() }
+        }
+        IdeButton("Check for updates", icon = Icons.Outlined.Refresh, enabled = !st.busy) { AppUpdater.check() }
+        release?.let { IdeButton("Release notes") { host.openUrl(it.htmlUrl) } }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Check on launch", style = Type.small)
+            Muted("Looks for a new release at most every few hours. Installing always asks you first.", style = Type.tiny)
+        }
+        IdeSwitch(st.autoCheck) { AppUpdater.setAutoCheck(it) }
     }
 }
 
