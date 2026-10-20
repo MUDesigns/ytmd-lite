@@ -10,9 +10,12 @@
     <!-- In-app updates from GitHub Releases (update/AppUpdater.kt). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- hasFragileUserData: uninstalling offers "Keep app data", so a reinstall keeps the sign-in
+         (files/backend) and offline downloads (files/downloads) if it is signed with the same key. -->
     <application
         android:name=".YtmdApp"
         android:allowBackup="false"
+        android:hasFragileUserData="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"

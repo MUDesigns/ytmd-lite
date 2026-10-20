@@ -65,6 +65,15 @@ android {
     }
 
     buildTypes {
+        // Debug builds are signed with a per-machine key, so installing one over the release app
+        // (or the other way round) forces an uninstall that wipes the sign-in and downloads.
+        // A separate package id lets them sit side by side instead.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            // Release APKs are another package; the updater could never install them here.
+            buildConfigField("boolean", "UPDATER_ENABLED", "false")
+        }
         release {
             isMinifyEnabled = false
             if (keystore != null) signingConfig = signingConfigs.getByName("release")

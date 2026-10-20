@@ -49,10 +49,15 @@ The app updates itself from this repository's GitHub releases, without the Play 
 Android only installs an update signed with the same key as the installed app, so every release
 must be signed with the release keystore held in the CI secrets (see **CI**): `android.yml` fails
 a release build when they are missing rather than publishing a debug-signed APK. Debug builds
-(`assembleDebug`, or a CI `…_android-debug.apk` from a branch) use a per-machine key, so they
-cannot update a release install and vice versa: uninstall first. Releases from before the
-keystore existed (v0.4.29 and earlier) were debug-signed, so phones running them need that one
-reinstall too; after it, updates are in-app.
+(`assembleDebug`, or a CI `…_android-debug.apk` from a branch) use a per-machine key, so they are
+a separate package (`app.ytmdesktop.lite.debug`, shown as "YTMD Lite (debug)") that installs next
+to the release app instead of replacing it, and their updater is off. Releases from before the
+keystore existed (v0.4.29 and earlier) were debug-signed with a different key each build, which is
+why every update needed an uninstall that wiped the sign-in and downloads. Moving to v0.4.30 needs
+that one last reinstall; from then on, updates keep all app data.
+
+Uninstalling offers to **keep app data** (`android:hasFragileUserData`). If kept, reinstalling a
+release APK brings back the sign-in, settings, and offline downloads.
 
 Set `UPDATER_ENABLED` to `false` in `app/build.gradle.kts` for a build that goes to a store: Play's
 policy does not allow apps to update themselves outside Play. The GitHub API allows 60 anonymous
