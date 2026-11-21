@@ -369,7 +369,6 @@ private fun LazyListScope.detailPanel(vm: AppViewModel, host: Host, actions: Ite
                     onPlay = { if (track.videoId != null) vm.playItems(tracks, i) else vm.openItem(track) },
                     onLike = { vm.toggleLike(track.videoId, track.toQueueItem()) },
                     onMenu = { host.showItemMenu(track) },
-                    onArtist = vm::openArtist,
                 )
             }
             if (Ytmd.code) {
@@ -537,7 +536,7 @@ private fun QueueRow(vm: AppViewModel, host: Host, index: Int, q: QueueItem, sel
                 style = Type.base, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
             ArtistLinksText(
-                q.channelId?.let { listOf(app.ytmdesktop.lite.data.ArtistLink(q.author, it)) }, q.author, vm::openArtist,
+                q.channelId?.let { listOf(app.ytmdesktop.lite.data.ArtistLink(q.author, it)) }, q.author, null,
                 prefix = if (code) buildAnnotatedString { append("// ") } else null,
             )
         }
@@ -656,7 +655,6 @@ private fun DownloadedSongs(vm: AppViewModel, host: Host) {
                 onPlay = { vm.playItems(items, i) },
                 onLike = { vm.toggleLike(q.videoId, q) },
                 onMenu = { host.showSongMenu(q) },
-                onArtist = vm::openArtist,
             )
         }
     }

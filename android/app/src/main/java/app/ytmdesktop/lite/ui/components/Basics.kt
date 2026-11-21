@@ -317,12 +317,15 @@ fun Artwork(
     }
 }
 
-/** Clickable artist names (ArtistLinks.svelte). */
+/**
+ * Artist names (ArtistLinks.svelte). Clickable when [onArtist] is set; list rows and cards pass null
+ * so a tap anywhere on them does the row's main action, with "Go to artist" in their menus instead.
+ */
 @Composable
 fun ArtistLinksText(
     links: List<ArtistLink>?,
     fallback: String,
-    onArtist: (ArtistLink) -> Unit,
+    onArtist: ((ArtistLink) -> Unit)?,
     style: TextStyle = Type.small,
     color: Color = Ytmd.colors.muted,
     prefix: AnnotatedString? = null,
@@ -335,6 +338,10 @@ fun ArtistLinksText(
         prefix?.let { append(it) }
         list.forEachIndexed { i, link ->
             if (i > 0) append(", ")
+            if (onArtist == null) {
+                append(link.name)
+                return@forEachIndexed
+            }
             withLink(
                 LinkAnnotation.Clickable(
                     tag = link.name,

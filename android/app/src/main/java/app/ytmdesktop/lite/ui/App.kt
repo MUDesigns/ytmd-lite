@@ -91,7 +91,7 @@ fun App(vm: AppViewModel, platform: Platform) {
     }
 
     val itemActions = remember(vm) {
-        ItemActions(open = vm::openItem, play = vm::playFromUi, menu = { itemMenu = it }, artist = vm::openArtist)
+        ItemActions(open = vm::openItem, play = vm::playFromUi, menu = { itemMenu = it })
     }
     val host = Host(
         signIn = platform.signIn,
@@ -192,7 +192,13 @@ fun App(vm: AppViewModel, platform: Platform) {
 }
 
 /** Song actions shared by track menus and the queue. */
-private fun songActions(vm: AppViewModel, q: QueueItem, host: Host, pickPlaylist: (QueueItem) -> Unit): List<MenuAction> {
+private fun songActions(
+    vm: AppViewModel,
+    q: QueueItem,
+    host: Host,
+    links: List<ArtistLink>? = null,
+    pickPlaylist: (QueueItem) -> Unit,
+): List<MenuAction> {
     val item = MusicItem(ItemType.song, q.videoId, q.title, q.author, q.thumbnails, videoId = q.videoId, album = q.album, albumId = q.albumId, artistBrowseId = q.channelId)
     val liked = q.videoId in vm.likedIds
     return buildList {
@@ -201,7 +207,7 @@ private fun songActions(vm: AppViewModel, q: QueueItem, host: Host, pickPlaylist
         add(MenuAction("Add to queue", Icons.AutoMirrored.Outlined.PlaylistPlay) { vm.queueItem(item) })
         if (vm.signedIn) add(MenuAction("Add to playlist…", Icons.AutoMirrored.Outlined.PlaylistAdd) { pickPlaylist(q) })
         add(MenuAction(if (liked) "Unlike" else "Like", if (liked) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder) { vm.toggleLike(q.videoId, q) })
-        if (q.author.isNotEmpty()) add(MenuAction("Go to artist", Icons.Outlined.Person) { vm.openArtist(ArtistLink(q.author.split(",").first().trim(), q.channelId)) })
+        addGoToArtists(vm, links ?: artistsFromLine(q.author, q.channelId))
         q.albumId?.let { albumId ->
             add(MenuAction("Go to album", Icons.Outlined.Album) {
                 vm.openDetail(DetailTarget(browseId = albumId, title = q.album), MusicItem(ItemType.album, albumId, q.album ?: "Album", browseId = albumId))
@@ -218,6 +224,18 @@ private fun songActions(vm: AppViewModel, q: QueueItem, host: Host, pickPlaylist
     }
 }
 
+/** Artists named in a comma-separated credit line; the first one gets the known channel id. */
+private fun artistsFromLine(line: String, firstId: String?): List<ArtistLink> =
+    line.split(",").map { it.trim() }.filter { it.isNotEmpty() }.mapIndexed { i, name -> ArtistLink(name, if (i == 0) firstId else null) }
+
+/** One "Go to artist" entry, or one per artist when a track or album credits several. */
+private fun MutableList<MenuAction>.addGoToArtists(vm: AppViewModel, links: List<ArtistLink>) {
+    val artists = links.distinctBy { it.name }
+    artists.forEach { link ->
+        add(MenuAction(if (artists.size == 1) "Go to artist" else "Go to ${link.name}", Icons.Outlined.Person) { vm.openArtist(link) })
+    }
+}
+
 /** Download / remove entry for albums, playlists and artists (their top songs). */
 private fun MutableList<MenuAction>.addCollectionDownload(vm: AppViewModel, item: MusicItem) {
     val key = Downloads.keyFor(item) ?: return
@@ -230,7 +248,7 @@ private fun MutableList<MenuAction>.addCollectionDownload(vm: AppViewModel, item
 
 /** contextActions() in +page.svelte. */
 private fun itemMenuActions(vm: AppViewModel, item: MusicItem, host: Host, pickPlaylist: (QueueItem) -> Unit): List<MenuAction> {
-    item.toQueueItem()?.let { return songActions(vm, it, host, pickPlaylist) }
+    item.toQueueItem()?.let { return songActions(vm, it, host, item.artistLinks, pickPlaylist) }
     return buildList {
         add(MenuAction("Open", Icons.Outlined.FolderOpen) { vm.openItem(item) })
         when (item.type) {
@@ -247,6 +265,9 @@ private fun itemMenuActions(vm: AppViewModel, item: MusicItem, host: Host, pickP
                 add(MenuAction("Shuffle", Icons.Outlined.Shuffle) { vm.shufflePlay(item) })
                 add(MenuAction("Play next", Icons.Outlined.QueuePlayNext) { vm.queueItem(item, next = true) })
                 add(MenuAction("Add to queue", Icons.AutoMirrored.Outlined.PlaylistPlay) { vm.queueItem(item) })
+                if (item.type == ItemType.album || item.type == ItemType.playlist) {
+                    item.artistLinks?.let { addGoToArtists(vm, it) }
+                }
                 Sharing.shareablePlaylistId(item)?.let { pid -> add(MenuAction("Share playlist…", Icons.Outlined.Link) { host.sharePlaylist(pid) }) }
                 addCollectionDownload(vm, item)
             }

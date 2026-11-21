@@ -51,7 +51,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import app.ytmdesktop.lite.data.Api
-import app.ytmdesktop.lite.data.ArtistLink
 import app.ytmdesktop.lite.data.ItemType
 import app.ytmdesktop.lite.data.MusicItem
 import app.ytmdesktop.lite.playback.Downloads
@@ -63,7 +62,6 @@ class ItemActions(
     val open: (MusicItem) -> Unit,
     val play: (MusicItem) -> Unit,
     val menu: (MusicItem) -> Unit,
-    val artist: (ArtistLink) -> Unit,
 )
 
 private fun parseHex(hex: String): Color? = runCatching { Color(android.graphics.Color.parseColor(hex)) }.getOrNull()
@@ -118,7 +116,7 @@ fun MusicCard(item: MusicItem, actions: ItemActions) {
         Column {
             Text(item.title, style = Type.small.copy(fontWeight = FontWeight.Medium), maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (showArtists && (item.artistLinks != null || item.subtitle != null)) {
-                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), actions.artist, style = Type.tiny)
+                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), null, style = Type.tiny)
             } else {
                 Muted(item.subtitle ?: item.type.name, style = Type.tiny)
             }
@@ -158,7 +156,7 @@ fun CodeEntry(line: Int, item: MusicItem, actions: ItemActions) {
             )
             val comment = buildAnnotatedString { withStyle(SpanStyle(color = c.muted)) { append("// ") } }
             if (showArtists && (item.artistLinks != null || item.subtitle != null)) {
-                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), actions.artist, style = Type.tiny, prefix = comment)
+                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), null, style = Type.tiny, prefix = comment)
             } else {
                 Muted("// ${item.subtitle ?: "Open ${item.type.name}"}", style = Type.tiny)
             }
@@ -250,7 +248,6 @@ fun TrackRow(
     onPlay: () -> Unit,
     onLike: () -> Unit,
     onMenu: () -> Unit,
-    onArtist: (ArtistLink) -> Unit,
     selected: Boolean = false,
     downloaded: Boolean = false,
     /** Percent of an in-flight download, shown instead of the offline pin. */
@@ -284,7 +281,7 @@ fun TrackRow(
                 overflow = TextOverflow.Ellipsis,
             )
             ArtistLinksText(
-                item.artistLinks, item.subtitle ?: item.type.name, onArtist,
+                item.artistLinks, item.subtitle ?: item.type.name, null,
                 prefix = if (code) buildAnnotatedString { append("// ") } else null,
             )
         }
@@ -341,7 +338,7 @@ private fun ResultRow(item: MusicItem, actions: ItemActions) {
                     style = Type.tiny,
                     color = c.muted,
                 )
-                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), actions.artist)
+                ArtistLinksText(item.artistLinks, item.subtitle.orEmpty(), null)
             }
         }
         if (item.canPlay && !isMood) {
